@@ -1,0 +1,14 @@
+# 虚拟环境
+.venv/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 截图/临时文件
+.screenshots/
+
+# 系统文件
+Thumbs.db
+.DS_Store
