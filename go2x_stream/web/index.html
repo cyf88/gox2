@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Go2X 实时画面</title>
+<title>Go2X 控制台</title>
 <style>
   :root {
     color-scheme: dark;
@@ -15,22 +15,63 @@
     --ok: #34d399;
     --warn: #fbbf24;
     --err: #f87171;
+    --accent: #3b82f6;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0;
     min-height: 100vh;
-    background: radial-gradient(1200px 600px at 50% -10%, #182030 0%, var(--bg) 60%);
+    background: var(--bg);
     color: var(--text);
     font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  .layout { display: flex; min-height: 100vh; }
+
+  /* 左侧导航 */
+  .sidebar {
+    width: 220px;
+    flex-shrink: 0;
+    background: #0e1116;
+    border-right: 1px solid var(--border);
+    padding: 20px 12px;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    padding: 20px;
-    gap: 16px;
+    gap: 18px;
   }
+  .brand {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: .5px;
+    padding: 4px 12px;
+    color: var(--text);
+  }
+  .brand span { color: var(--ok); }
+  .nav { display: flex; flex-direction: column; gap: 6px; }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 11px 14px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 14px;
+    cursor: pointer;
+    text-align: left;
+    transition: background .15s, color .15s;
+  }
+  .nav-item:hover { background: #161b23; color: var(--text); }
+  .nav-item.active { background: #1a2230; color: var(--text); font-weight: 600; }
+  .nav-item .ico { width: 18px; text-align: center; }
+
+  /* 主内容 */
+  .main { flex: 1; padding: 20px 24px; min-width: 0; }
+  .view { display: none; flex-direction: column; gap: 16px; }
+  .view.active { display: flex; }
+
   header {
-    width: min(1280px, 100%);
     display: flex;
     align-items: center;
     gap: 14px;
@@ -55,10 +96,12 @@
   .pill.warn .dot { background: var(--warn); }
   .pill.err .dot { background: var(--err); }
   .meta { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
   .stage {
     position: relative;
-    width: min(1280px, 100%);
+    width: 100%;
     aspect-ratio: 16 / 9;
+    max-height: 70vh;
     background: #000;
     border: 1px solid var(--border);
     border-radius: 12px;
@@ -93,13 +136,12 @@
     animation: spin 0.9s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  footer { font-size: 12px; color: #5f6775; }
-  .saybar {
-    width: min(1280px, 100%);
-    display: flex;
-    gap: 10px;
+
+  .saybar { display: flex; gap: 10px; }
+  input[type="text"], input[type="file"] {
+    font-family: inherit;
   }
-  #sayText {
+  .text-input {
     flex: 1;
     padding: 10px 14px;
     border-radius: 10px;
@@ -109,45 +151,208 @@
     font-size: 14px;
     outline: none;
   }
-  #sayText:focus { border-color: var(--ok); }
-  #sayBtn {
+  .text-input:focus { border-color: var(--ok); }
+  .btn {
     padding: 10px 22px;
     border-radius: 10px;
     border: none;
-    background: var(--ok);
-    color: #06210f;
     font-size: 14px;
     font-weight: 600;
     cursor: pointer;
   }
-  #sayBtn:disabled { opacity: .55; cursor: not-allowed; }
+  .btn-green { background: var(--ok); color: #06210f; }
+  .btn-blue { background: var(--accent); color: #fff; }
+  .btn-red { background: var(--err); color: #fff; }
+  .btn:disabled { opacity: .55; cursor: not-allowed; }
+
+  /* 人脸添加视图 */
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .card h2 { margin: 0 0 6px; font-size: 16px; }
+  .card .sub { margin: 0 0 16px; font-size: 13px; color: var(--muted); }
+  .faceform {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .faceform .name-input { width: 200px; }
+  .file-input {
+    flex: 1;
+    min-width: 220px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .file-input::file-selector-button {
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .facelist { margin-top: 20px; }
+  .facelist h3 { margin: 0 0 10px; font-size: 14px; color: var(--muted); font-weight: 500; }
+  .face-tags { display: flex; flex-wrap: wrap; gap: 10px; }
+  .face-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 14px 5px 5px;
+    border-radius: 999px;
+    background: #1a2230;
+    border: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .face-thumb {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    object-fit: cover;
+    background: #000;
+    border: 1px solid var(--border);
+  }
+  .face-name { margin-right: 2px; }
+  .face-del {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: none;
+    background: #2a3140;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .face-del:hover { background: var(--err); color: #fff; }
+  .face-empty { font-size: 13px; color: var(--muted); }
+  .detect-meta { font-size: 13px; color: var(--muted); margin-bottom: 12px; }
+  .detect-time { font-size: 12px; color: var(--muted); }
+
+  footer { font-size: 12px; color: #5f6775; }
 </style>
 </head>
 <body>
-  <header>
-    <h1>Go2X 实时画面</h1>
-    <span id="state" class="pill warn"><span class="dot"></span><span id="stateText">连接中</span></span>
-    <span class="spacer"></span>
-    <span id="meta" class="meta">--</span>
-  </header>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">Go2<span>X</span></div>
+      <nav class="nav">
+        <button class="nav-item active" data-view="live">
+          <span class="ico">▣</span>实时画面
+        </button>
+        <button class="nav-item" data-view="face">
+          <span class="ico">◉</span>人脸添加
+        </button>
+        <button class="nav-item" data-view="detect">
+          <span class="ico">▷</span>视频检测
+        </button>
+      </nav>
+    </aside>
 
-  <div class="stage">
-    <img id="video" src="/video" alt="Go2 视频流">
-    <div id="overlay" class="overlay">
-      <div class="spinner"></div>
-      <div class="title">正在等待机器狗画面</div>
-      <div id="detail" class="detail">服务会持续尝试连接 Go2，连接成功后自动显示。</div>
-    </div>
+    <main class="main">
+      <!-- 实时画面视图 -->
+      <section class="view active" id="view-live">
+        <header>
+          <h1>实时画面</h1>
+          <span id="state" class="pill warn"><span class="dot"></span><span id="stateText">连接中</span></span>
+          <span class="spacer"></span>
+          <span id="meta" class="meta">--</span>
+        </header>
+
+        <div class="stage">
+          <img id="video" src="/video" alt="Go2 视频流">
+          <div id="overlay" class="overlay">
+            <div class="spinner"></div>
+            <div class="title">正在等待机器狗画面</div>
+            <div id="detail" class="detail">服务会持续尝试连接 Go2，连接成功后自动显示。</div>
+          </div>
+        </div>
+
+        <div class="saybar">
+          <input id="sayText" class="text-input" type="text" placeholder="输入要播报的文字，回车或点「播报」" maxlength="200">
+          <button id="sayBtn" class="btn btn-green">播报</button>
+        </div>
+
+        <footer>数据每秒刷新一次 · 画面通过 MJPEG 实时推送</footer>
+      </section>
+
+      <!-- 人脸添加视图 -->
+      <section class="view" id="view-face">
+        <header>
+          <h1>人脸添加</h1>
+        </header>
+
+        <div class="card">
+          <h2>注册人脸</h2>
+          <p class="sub">上传一张正脸清晰的照片，识别到该人脸时机器狗会播报姓名。</p>
+          <div class="faceform">
+            <input id="faceName" class="text-input name-input" type="text" placeholder="姓名（如 张三）" maxlength="50">
+            <input id="faceFile" class="file-input" type="file" accept="image/*">
+            <button id="faceBtn" class="btn btn-blue">注册人脸</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>已注册人脸</h2>
+          <div class="facelist">
+            <div id="faceTags" class="face-tags">
+              <span class="face-empty">加载中…</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 视频检测视图 -->
+      <section class="view" id="view-detect">
+        <header>
+          <h1>视频检测</h1>
+        </header>
+
+        <div class="card">
+          <h2>上传测试视频</h2>
+          <p class="sub">上传一段视频，检测识别视频中出现的已注册人脸，并在画面上标注姓名和相似度。</p>
+          <div class="faceform">
+            <input id="videoFile" class="file-input" type="file" accept="video/*">
+            <button id="detectBtn" class="btn btn-blue">开始检测</button>
+            <button id="stopBtn" class="btn btn-red" disabled>停止检测</button>
+          </div>
+        </div>
+
+        <div class="stage" id="detectStage" style="display:none">
+          <img id="detectVideo" alt="检测视频流">
+        </div>
+      </section>
+    </main>
   </div>
-
-  <div class="saybar">
-    <input id="sayText" type="text" placeholder="输入要播报的文字，回车或点「播报」" maxlength="200">
-    <button id="sayBtn">播报</button>
-  </div>
-
-  <footer>数据每秒刷新一次 · 画面通过 MJPEG 实时推送</footer>
 
 <script>
+  // ── 导航切换 ────────────────────────────────────────────────
+  const navItems = document.querySelectorAll('.nav-item');
+  const views = {
+    live: document.getElementById('view-live'),
+    face: document.getElementById('view-face'),
+    detect: document.getElementById('view-detect')
+  };
+  navItems.forEach(item => {
+    item.addEventListener('click', () => {
+      navItems.forEach(n => n.classList.remove('active'));
+      item.classList.add('active');
+      Object.entries(views).forEach(([k, v]) => {
+        v.classList.toggle('active', k === item.dataset.view);
+      });
+      if (item.dataset.view === 'face') loadFaces();
+    });
+  });
+
+  // ── 实时画面 ────────────────────────────────────────────────
   const video = document.getElementById('video');
   const overlay = document.getElementById('overlay');
   const detail = document.getElementById('detail');
@@ -163,7 +368,6 @@
   function reloadStream() {
     video.src = '/video?t=' + Date.now();
   }
-
   video.addEventListener('error', () => setTimeout(reloadStream, 2000));
   video.addEventListener('load', () => overlay.classList.add('hidden'));
 
@@ -171,40 +375,29 @@
     try {
       const r = await fetch('/api/status', { cache: 'no-store' });
       const s = await r.json();
-      if (s.connected) {
-        setState('ok', '已连接');
-      } else if (s.error) {
-        setState('err', '连接失败');
-      } else {
-        setState('warn', '连接中');
-      }
+      if (s.connected) setState('ok', '已连接');
+      else if (s.error) setState('err', '连接失败');
+      else setState('warn', '连接中');
 
       if (s.width && s.height) {
         meta.textContent = `${s.width} × ${s.height} · ${s.fps.toFixed(1)} fps · ${s.source}`;
       } else {
         meta.textContent = s.source;
       }
+      if (s.error) detail.textContent = s.error;
+      else if (!s.connected) detail.textContent = '正在连接 ' + s.source + ' ...';
 
-      if (s.error) {
-        detail.textContent = s.error;
-      } else if (!s.connected) {
-        detail.textContent = '正在连接 ' + s.source + ' ...';
-      }
-
-      const hasFrame = s.frames > 0;
-      overlay.classList.toggle('hidden', hasFrame);
+      overlay.classList.toggle('hidden', s.frames > 0);
     } catch (e) {
       setState('err', '服务不可用');
       detail.textContent = '无法访问本地服务，请确认进程仍在运行。';
     }
   }
-
   refresh();
   setInterval(refresh, 1000);
 
   const sayText = document.getElementById('sayText');
   const sayBtn = document.getElementById('sayBtn');
-
   async function doSay() {
     const text = sayText.value.trim();
     if (!text) { sayText.focus(); return; }
@@ -217,9 +410,7 @@
         body: JSON.stringify({ text })
       });
       const data = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        alert('播报失败：' + (data.detail || ('HTTP ' + r.status)));
-      }
+      if (!r.ok) alert('播报失败：' + (data.detail || ('HTTP ' + r.status)));
     } catch (e) {
       alert('请求失败：' + e.message);
     } finally {
@@ -227,11 +418,128 @@
       sayBtn.textContent = '播报';
     }
   }
-
   sayBtn.addEventListener('click', doSay);
-  sayText.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') doSay();
+  sayText.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSay(); });
+
+  // ── 人脸添加 ────────────────────────────────────────────────
+  const faceName = document.getElementById('faceName');
+  const faceFile = document.getElementById('faceFile');
+  const faceBtn = document.getElementById('faceBtn');
+  const faceTags = document.getElementById('faceTags');
+
+  const DEFAULT_AVATAR = "data:image/svg+xml;utf8," + encodeURIComponent(
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='#2a3140'/><circle cx='50' cy='40' r='18' fill='#5f6775'/><ellipse cx='50' cy='82' rx='24' ry='16' fill='#5f6775'/></svg>"
+  );
+
+  async function loadFaces() {
+    try {
+      const r = await fetch('/api/faces', { cache: 'no-store' });
+      const names = await r.json();
+      if (!names || names.length === 0) {
+        faceTags.innerHTML = '<span class="face-empty">暂无已注册人脸</span>';
+        return;
+      }
+      faceTags.innerHTML = names.map(n =>
+        `<span class="face-tag"><img class="face-thumb" src="/api/face_image/${encodeURIComponent(n)}" alt="${n}" onerror="this.onerror=null;this.src=window.DEFAULT_AVATAR"><span class="face-name">${n}</span><button class="face-del" data-name="${n}" title="删除">×</button></span>`
+      ).join('');
+    } catch (e) {
+      faceTags.innerHTML = '<span class="face-empty">加载失败</span>';
+    }
+  }
+  window.DEFAULT_AVATAR = DEFAULT_AVATAR;
+
+  async function deleteFace(name) {
+    if (!confirm(`确定删除「${name}」吗？`)) return;
+    try {
+      const r = await fetch('/api/face/' + encodeURIComponent(name), { method: 'DELETE' });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) {
+        loadFaces();
+      } else {
+        alert('删除失败：' + (data.detail || ('HTTP ' + r.status)));
+      }
+    } catch (e) {
+      alert('请求失败：' + e.message);
+    }
+  }
+
+  faceTags.addEventListener('click', (e) => {
+    const btn = e.target.closest('.face-del');
+    if (btn) deleteFace(btn.dataset.name);
   });
+
+  async function registerFace() {
+    const name = faceName.value.trim();
+    const file = faceFile.files[0];
+    if (!name) { faceName.focus(); return; }
+    if (!file) { alert('请选择要注册的人脸图片'); return; }
+    faceBtn.disabled = true;
+    faceBtn.textContent = '注册中…';
+    try {
+      const fd = new FormData();
+      fd.append('name', name);
+      fd.append('image', file);
+      const r = await fetch('/api/register_face', { method: 'POST', body: fd });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) {
+        alert('注册成功：' + name);
+        faceName.value = '';
+        faceFile.value = '';
+        loadFaces();
+      } else {
+        alert('注册失败：' + (data.detail || ('HTTP ' + r.status)));
+      }
+    } catch (e) {
+      alert('请求失败：' + e.message);
+    } finally {
+      faceBtn.disabled = false;
+      faceBtn.textContent = '注册人脸';
+    }
+  }
+  faceBtn.addEventListener('click', registerFace);
+  loadFaces();
+
+  // ── 视频检测 ────────────────────────────────────────────────
+  const videoFile = document.getElementById('videoFile');
+  const detectBtn = document.getElementById('detectBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const detectStage = document.getElementById('detectStage');
+  const detectVideo = document.getElementById('detectVideo');
+
+  async function doDetect() {
+    const file = videoFile.files[0];
+    if (!file) { alert('请选择要检测的视频文件'); return; }
+    detectBtn.disabled = true;
+    detectBtn.textContent = '检测中…';
+    stopBtn.disabled = false;
+    try {
+      const fd = new FormData();
+      fd.append('video', file);
+      const r = await fetch('/api/upload_video', { method: 'POST', body: fd });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        alert('上传失败：' + (data.detail || ('HTTP ' + r.status)));
+        return;
+      }
+      detectVideo.src = '/api/detect_stream/' + data.video_id + '?t=' + Date.now();
+      detectStage.style.display = 'flex';
+    } catch (e) {
+      alert('请求失败：' + e.message);
+    } finally {
+      detectBtn.disabled = false;
+      detectBtn.textContent = '开始检测';
+    }
+  }
+
+  function stopDetect() {
+    detectVideo.src = '';
+    detectStage.style.display = 'none';
+    stopBtn.disabled = true;
+    detectBtn.textContent = '开始检测';
+  }
+
+  detectBtn.addEventListener('click', doDetect);
+  stopBtn.addEventListener('click', stopDetect);
 </script>
 </body>
 </html>

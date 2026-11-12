@@ -5,6 +5,9 @@ cyclonedds==0.10.2 ; python_version < "3.13"
 unitree_webrtc_connect>=2.2.0
 fastapi>=0.110
 uvicorn>=0.29
+python-multipart>=0.0.9
 opencv-python>=4.9
 numpy>=1.26
 comtypes>=1.4
+insightface>=0.7
+onnxruntime>=1.19

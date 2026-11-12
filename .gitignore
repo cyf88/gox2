@@ -9,6 +9,15 @@ __pycache__/
 # 截图/临时文件
 .screenshots/
 
+# 模型文件（InsightFace 等，运行时自动下载）
+models/
+
+# 人脸特征库（个人数据）
+faces/
+
+# 测试视频
+video/
+
 # 系统文件
 Thumbs.db
 .DS_Store

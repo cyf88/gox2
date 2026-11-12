@@ -46,6 +46,9 @@ class Go2WebRtcStream:
         jpeg_quality: int = 80,
         reconnect_delay: float = 3.0,
         stall_timeout: float = 10.0,
+        face_recognizer=None,
+        say_cooldown: float = 30.0,
+        face_interval: float = 1.0,
     ) -> None:
         if ip is None and serial_number is None:
             self._method = WebRTCConnectionMethod.LocalAP
@@ -74,6 +77,14 @@ class Go2WebRtcStream:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._conn: Optional[UnitreeWebRTCConnection] = None
 
+        # 人脸识别（可选，PC 本地运行）
+        self._face_recognizer = face_recognizer
+        self._say_cooldown = say_cooldown
+        self._face_interval = face_interval
+        self._last_said: dict[str, float] = {}
+        self._face_stop = threading.Event()
+        self._face_thread: Optional[threading.Thread] = None
+
     # ─── 对外接口 ───────────────────────────────────────────────
 
     def start(self) -> None:
@@ -86,15 +97,26 @@ class Go2WebRtcStream:
         )
         self._thread.start()
 
+        if self._face_recognizer is not None:
+            self._face_stop.clear()
+            self._face_thread = threading.Thread(
+                target=self._face_loop, name="go2-face-recognize", daemon=True
+            )
+            self._face_thread.start()
+
     def stop(self) -> None:
         """停止拉流并等待线程退出。"""
         self._stop.set()
+        self._face_stop.set()
         loop, conn = self._loop, self._conn
         if loop and conn and not loop.is_closed():
             try:
                 asyncio.run_coroutine_threadsafe(conn.disconnect(), loop)
             except RuntimeError:
                 pass
+        if self._face_thread:
+            self._face_thread.join(timeout=5)
+            self._face_thread = None
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
@@ -126,6 +148,97 @@ class Go2WebRtcStream:
             raise RuntimeError("机器狗未连接")
         future = asyncio.run_coroutine_threadsafe(self._say_async(text), loop)
         return future.result(timeout=90)
+
+    def register_face(self, name: str, image_bytes: bytes) -> dict:
+        """从上传的图片字节注册人脸（需已启用人脸识别）。"""
+        if self._face_recognizer is None:
+            raise RuntimeError("未启用人脸识别（启动服务时需加 --face）")
+        import numpy as np
+
+        img = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise RuntimeError("无法解码图片，请上传 JPG/PNG 格式")
+        self._face_recognizer.register_image(name, img)
+        return {"ok": True, "name": name}
+
+    def registered_faces(self) -> list[str]:
+        """返回已注册的人脸姓名列表。"""
+        if self._face_recognizer is None:
+            return []
+        return self._face_recognizer.registered_names()
+
+    def face_image_path(self, name: str):
+        """返回注册人脸的缩略图路径（不存在则返回 None）。"""
+        if self._face_recognizer is None:
+            return None
+        return self._face_recognizer.face_image_path(name)
+
+    def delete_face(self, name: str) -> dict:
+        """删除一个已注册的人脸。"""
+        if self._face_recognizer is None:
+            raise RuntimeError("未启用人脸识别（启动服务时需加 --face）")
+        if not self._face_recognizer.delete(name):
+            raise RuntimeError(f"未找到已注册人脸: {name}")
+        return {"ok": True, "name": name}
+
+    def detect_video(self, video_bytes: bytes, filename: str = "video.mp4") -> dict:
+        """对上传的离线视频做人脸检测识别，返回识别结果汇总。"""
+        if self._face_recognizer is None:
+            raise RuntimeError("未启用人脸识别（启动服务时需加 --face）")
+        import tempfile
+        from pathlib import Path
+
+        suffix = Path(filename).suffix or ".mp4"
+        fd, path = tempfile.mkstemp(suffix=suffix, prefix="go2x_detect_")
+        with open(fd, "wb") as f:
+            f.write(video_bytes)
+        try:
+            return self._face_recognizer.detect_video(path)
+        finally:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def detect_frame(self, frame) -> list:
+        """检测单帧图像，返回 [(姓名, 相似度, bbox)]（供画框展示）。"""
+        if self._face_recognizer is None:
+            return []
+        return self._face_recognizer.detect_with_boxes(frame)
+
+    # ─── 人脸识别 ───────────────────────────────────────────────
+
+    def _face_loop(self) -> None:
+        """人脸识别循环：定时从最新帧检测并识别，识别到人时去重播报。"""
+        import numpy as np
+
+        while not self._face_stop.is_set():
+            frame = self.latest_frame()
+            if frame is not None:
+                try:
+                    img = cv2.imdecode(
+                        np.frombuffer(frame.jpeg, dtype=np.uint8), cv2.IMREAD_COLOR
+                    )
+                    if img is not None:
+                        results = self._face_recognizer.recognize(img)
+                        if results:
+                            name, sim = results[0]
+                            now = time.monotonic()
+                            if now - self._last_said.get(name, 0.0) >= self._say_cooldown:
+                                self._last_said[name] = now
+                                self._announce(name, sim)
+                except Exception as exc:
+                    logger.warning("人脸识别失败: %s", exc)
+            self._face_stop.wait(self._face_interval)
+
+    def _announce(self, name: str, sim: float) -> None:
+        """识别到人后触发机器狗播报。"""
+        text = f"识别到{name}"
+        logger.info("识别到 %s（相似度 %.2f），播报: %s", name, sim, text)
+        try:
+            self.say(text)
+        except Exception as exc:
+            logger.warning("播报失败: %s", exc)
 
     async def _say_async(self, text: str) -> dict:
         conn = self._conn

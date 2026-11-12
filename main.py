@@ -64,6 +64,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--host", default="127.0.0.1", help="Web 服务监听地址")
     parser.add_argument("--port", type=int, default=8000, help="Web 服务端口")
+
+    face = parser.add_argument_group("人脸识别")
+    face.add_argument(
+        "--face", action="store_true", help="启用人脸识别（识别到注册人脸时播报）"
+    )
+    face.add_argument(
+        "--say-cooldown", type=float, default=30.0,
+        help="同一人播报冷却时间（秒），默认 30",
+    )
+    face.add_argument(
+        "--face-interval", type=float, default=1.0,
+        help="人脸识别间隔（秒），默认 1",
+    )
+
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -101,6 +115,18 @@ def run_window(stream) -> None:
 
 
 def create_stream(args: argparse.Namespace):
+    face_recognizer = None
+    if args.face:
+        from pathlib import Path
+
+        from go2x_stream.face import FaceRecognizer
+
+        base = Path(__file__).resolve().parent
+        face_recognizer = FaceRecognizer(
+            model_root=base,
+            faces_dir=base / "faces",
+        )
+
     if args.source == "dds":
         return Go2DdsStream(
             network_interface=args.interface,
@@ -112,6 +138,9 @@ def create_stream(args: argparse.Namespace):
         serial_number=args.sn,
         aes_key=args.aes_key,
         jpeg_quality=args.quality,
+        face_recognizer=face_recognizer,
+        say_cooldown=args.say_cooldown,
+        face_interval=args.face_interval,
     )
 
 
