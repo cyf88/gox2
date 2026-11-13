@@ -12,6 +12,7 @@ import base64
 import hashlib
 import json
 import logging
+import socket
 import threading
 import time
 from collections import deque
@@ -23,17 +24,31 @@ from unitree_webrtc_connect import (
     UnitreeWebRTCConnection,
     WebRTCConnectionMethod,
 )
+from unitree_webrtc_connect.constants import RTC_TOPIC
+from unitree_webrtc_connect.multicast_scanner import discover_ip_sn
 
 from .frame import Frame
 from .tts import synthesize_wav, write_temp_wav
 
 logger = logging.getLogger(__name__)
 
+# 自动模式下的候选地址：机器狗 AP 热点、有线直连的内置电脑
+_AUTO_CANDIDATES = ("192.168.12.1", "192.168.123.161")
+
+
+def _port_open(ip: str, port: int = 9991, timeout: float = 0.6) -> bool:
+    """探测机器狗 WebRTC 信令端口是否可达。"""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
 
 class Go2WebRtcStream:
     """维护与 Go2 的 WebRTC 连接，对外只暴露"最新一帧"。
 
-    - 不传 ``ip`` / ``sn`` 时按 AP 直连（192.168.12.1）连接机器狗热点；
+    - 不传 ``ip`` / ``sn`` 时自动探测：AP 热点 → 有线直连 → 组播发现；
     - 传 ``ip`` 或 ``sn`` 时按 STA 模式连接同一局域网内的机器狗；
     - 断线或视频中断后自动重连。
     """
@@ -49,8 +64,10 @@ class Go2WebRtcStream:
         face_recognizer=None,
         say_cooldown: float = 30.0,
         face_interval: float = 1.0,
+        motion=None,
     ) -> None:
-        if ip is None and serial_number is None:
+        self._auto = ip is None and serial_number is None
+        if self._auto:
             self._method = WebRTCConnectionMethod.LocalAP
             self._target = "192.168.12.1 (AP 直连)"
         else:
@@ -85,6 +102,12 @@ class Go2WebRtcStream:
         self._face_stop = threading.Event()
         self._face_thread: Optional[threading.Thread] = None
 
+        # 运动控制（可选，WebRTC sport 通道）
+        self._motion = motion
+
+        if self._auto:
+            self._apply_auto_target()
+
     # ─── 对外接口 ───────────────────────────────────────────────
 
     def start(self) -> None:
@@ -108,6 +131,8 @@ class Go2WebRtcStream:
         """停止拉流并等待线程退出。"""
         self._stop.set()
         self._face_stop.set()
+        if self._motion is not None:
+            self._motion.stop()
         loop, conn = self._loop, self._conn
         if loop and conn and not loop.is_closed():
             try:
@@ -132,11 +157,57 @@ class Go2WebRtcStream:
                 "connected": self._connected,
                 "error": self._error,
                 "source": f"WebRTC · {self._target}",
+                "ip": self._ip or "",
                 "width": frame.width if frame else 0,
                 "height": frame.height if frame else 0,
                 "fps": round(self._fps_locked(), 1),
                 "frames": self._seq,
             }
+
+    def connect(self, ip: str, aes_key: Optional[str] = None) -> dict:
+        """运行时更新机器狗 IP（可选 AES 密钥）并触发重连。"""
+        if not ip:
+            raise ValueError("IP 不能为空")
+        self._auto = False
+        self._ip = ip
+        self._serial_number = None
+        self._method = WebRTCConnectionMethod.LocalSTA
+        self._target = ip
+        if aes_key:
+            self._aes_key = aes_key
+        with self._lock:
+            self._error = None
+        # 断开当前连接以触发重连
+        loop, conn = self._loop, self._conn
+        if loop and conn and not loop.is_closed():
+            try:
+                asyncio.run_coroutine_threadsafe(conn.disconnect(), loop)
+            except RuntimeError:
+                pass
+        return self.status()
+
+    def sport_ready(self) -> bool:
+        """WebRTC 数据通道是否可用（运动指令依赖它）。"""
+        conn = self._conn
+        return bool(conn is not None and conn.isConnected)
+
+    def sport_action(self, api_id: int, timeout: float = 8.0) -> Optional[dict]:
+        """经 WebRTC 数据通道下发一条 sport 指令（线程安全，阻塞到收到应答）。"""
+        loop, conn = self._loop, self._conn
+        if conn is None or loop is None or loop.is_closed():
+            return None
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                conn.datachannel.pub_sub.publish_request_new(
+                    RTC_TOPIC["SPORT_MOD"],
+                    {"api_id": api_id, "parameter": {}},
+                ),
+                loop,
+            )
+            return future.result(timeout=timeout)
+        except Exception as exc:
+            logger.warning("sport 指令 %d 发送失败: %s", api_id, exc)
+            return None
 
     def say(self, text: str) -> dict:
         """把文字合成语音并让机器狗播报（阻塞，直到提交完成）。"""
@@ -149,7 +220,7 @@ class Go2WebRtcStream:
         future = asyncio.run_coroutine_threadsafe(self._say_async(text), loop)
         return future.result(timeout=90)
 
-    def register_face(self, name: str, image_bytes: bytes) -> dict:
+    def register_face(self, name: str, image_bytes: bytes, category: str = "") -> dict:
         """从上传的图片字节注册人脸（需已启用人脸识别）。"""
         if self._face_recognizer is None:
             raise RuntimeError("未启用人脸识别（启动服务时需加 --face）")
@@ -158,14 +229,29 @@ class Go2WebRtcStream:
         img = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             raise RuntimeError("无法解码图片，请上传 JPG/PNG 格式")
-        self._face_recognizer.register_image(name, img)
-        return {"ok": True, "name": name}
+        self._face_recognizer.register_image(name, img, category)
+        return {"ok": True, "name": name, "category": category}
 
-    def registered_faces(self) -> list[str]:
-        """返回已注册的人脸姓名列表。"""
+    def registered_faces(self) -> list[dict]:
+        """返回已注册的人脸列表（含姓名与分类）。"""
         if self._face_recognizer is None:
             return []
-        return self._face_recognizer.registered_names()
+        return [
+            {"name": n, "category": self._face_recognizer.category_of(n)}
+            for n in self._face_recognizer.registered_names()
+        ]
+
+    def do_action(self, action: str) -> dict:
+        """触发机器狗动作（需已启用运动控制）。"""
+        if self._motion is None:
+            raise RuntimeError("未启用运动控制")
+        return self._motion.do_action(action)
+
+    def motion_status(self) -> dict:
+        """返回运动控制状态。"""
+        if self._motion is None:
+            return {"ready": False, "error": "未启用运动控制", "interface": "", "domain_id": 0}
+        return self._motion.status()
 
     def face_image_path(self, name: str):
         """返回注册人脸的缩略图路径（不存在则返回 None）。"""
@@ -232,13 +318,22 @@ class Go2WebRtcStream:
             self._face_stop.wait(self._face_interval)
 
     def _announce(self, name: str, sim: float) -> None:
-        """识别到人后触发机器狗播报。"""
+        """识别到人后触发机器狗播报，并按该人的分类触发对应动作。"""
         text = f"识别到{name}"
         logger.info("识别到 %s（相似度 %.2f），播报: %s", name, sim, text)
         try:
             self.say(text)
         except Exception as exc:
             logger.warning("播报失败: %s", exc)
+
+        # 按人脸分类触发动作（分类为空则不动作）
+        if self._motion is not None and self._face_recognizer is not None:
+            category = self._face_recognizer.category_of(name)
+            if category:
+                try:
+                    self._motion.do_action(category)
+                except Exception as exc:
+                    logger.warning("触发动作 %s 失败: %s", category, exc)
 
     async def _say_async(self, text: str) -> dict:
         conn = self._conn
@@ -388,8 +483,35 @@ class Go2WebRtcStream:
 
     # ─── 后台线程 ───────────────────────────────────────────────
 
+    def _apply_auto_target(self) -> None:
+        """自动选择链路：AP 热点 → 有线直连 → 组播发现 → 回退 AP 等待。"""
+        for candidate in _AUTO_CANDIDATES:
+            if _port_open(candidate):
+                self._method = WebRTCConnectionMethod.LocalSTA
+                self._ip = candidate
+                self._target = f"{candidate} (自动发现)"
+                logger.info("自动发现机器狗: %s", candidate)
+                return
+        try:
+            found = discover_ip_sn(timeout=2)
+            if found:
+                ip = next(iter(found.values()))
+                self._method = WebRTCConnectionMethod.LocalSTA
+                self._ip = ip
+                self._target = f"{ip} (组播发现)"
+                logger.info("组播发现机器狗: %s", ip)
+                return
+        except Exception as exc:
+            logger.debug("组播发现失败: %s", exc)
+        self._method = WebRTCConnectionMethod.LocalAP
+        self._ip = None
+        self._target = "192.168.12.1 (AP 直连，等待连接)"
+
     def _run(self) -> None:
-        loop = asyncio.new_event_loop()
+        # Windows 默认的 Proactor 事件循环在子线程里会触发 aiortc 的
+        # __connect 竞态（remoteDescription 尚未设置就调用 __remoteRtp），
+        # 导致连接卡死。改用 Selector 事件循环可稳定建立连接。
+        loop = asyncio.SelectorEventLoop()
         asyncio.set_event_loop(loop)
         self._loop = loop
         try:
@@ -450,6 +572,8 @@ class Go2WebRtcStream:
 
             if self._stop.is_set():
                 break
+            if self._auto:
+                self._apply_auto_target()
             logger.info("%.0f 秒后重连", self._reconnect_delay)
             await self._sleep(self._reconnect_delay)
 

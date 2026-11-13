@@ -14,36 +14,57 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
+
+# 打包后的 exe 控制台默认 GBK 编码，unitree 库会打印 emoji，需强制 UTF-8
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import cv2
 import numpy as np
 
 from go2x_stream.dds import Go2DdsStream
+from go2x_stream.paths import app_dir, resource_dir
 from go2x_stream.server import create_app
 from go2x_stream.webrtc import Go2WebRtcStream
 
+CONFIG_PATH = app_dir() / "config.json"
+
+
+def load_config() -> dict:
+    """读取 config.json，缺失或损坏时返回空配置。"""
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logging.warning("读取配置文件失败 %s: %s", CONFIG_PATH, exc)
+        return {}
+
 
 def parse_args() -> argparse.Namespace:
+    cfg = load_config()
     parser = argparse.ArgumentParser(description="宇树 Go2 机器狗视频拉流并显示")
     parser.add_argument(
         "--source",
         choices=["webrtc", "dds"],
-        default="webrtc",
+        default=cfg.get("source", "webrtc"),
         help="拉流方式：webrtc（默认，走 WiFi）或 dds（需有线接入 192.168.123.x）",
     )
 
     webrtc = parser.add_argument_group("WebRTC")
     webrtc.add_argument(
-        "--ip", help="机器狗在局域网内的 IP；不填 --ip/--sn 时按 AP 直连 192.168.12.1"
+        "--ip", default=cfg.get("ip"), help="机器狗在局域网内的 IP；不填 --ip/--sn 时按 AP 直连 192.168.12.1"
     )
-    webrtc.add_argument("--sn", help="机器狗序列号，用于局域网内自动发现")
+    webrtc.add_argument("--sn", default=cfg.get("sn"), help="机器狗序列号，用于局域网内自动发现")
     webrtc.add_argument(
-        "--aes-key", help="新版固件局域网连接所需的 AES 密钥（可选）"
+        "--aes-key", default=cfg.get("aes_key"), help="新版固件局域网连接所需的 AES 密钥（可选）"
     )
     webrtc.add_argument(
-        "--quality", type=int, default=80, help="JPEG 编码质量 1-100，默认 80"
+        "--quality", type=int, default=cfg.get("quality", 80), help="JPEG 编码质量 1-100，默认 80"
     )
 
     dds = parser.add_argument_group("DDS")
@@ -62,25 +83,32 @@ def parse_args() -> argparse.Namespace:
         default="web",
         help="显示方式：web 浏览器页面（默认）或 window 本机窗口",
     )
-    parser.add_argument("--host", default="127.0.0.1", help="Web 服务监听地址")
-    parser.add_argument("--port", type=int, default=8000, help="Web 服务端口")
+    parser.add_argument("--host", default=cfg.get("host", "127.0.0.1"), help="Web 服务监听地址")
+    parser.add_argument("--port", type=int, default=cfg.get("port", 8000), help="Web 服务端口")
 
     face = parser.add_argument_group("人脸识别")
     face.add_argument(
-        "--face", action="store_true", help="启用人脸识别（识别到注册人脸时播报）"
+        "--face", action="store_true", default=cfg.get("face", False),
+        help="启用人脸识别（识别到注册人脸时播报）"
     )
     face.add_argument(
-        "--say-cooldown", type=float, default=30.0,
+        "--say-cooldown", type=float, default=cfg.get("say_cooldown", 30.0),
         help="同一人播报冷却时间（秒），默认 30",
     )
     face.add_argument(
-        "--face-interval", type=float, default=1.0,
+        "--face-interval", type=float, default=cfg.get("face_interval", 1.0),
         help="人脸识别间隔（秒），默认 1",
+    )
+
+    motion = parser.add_argument_group("运动控制（WebRTC sport）")
+    motion.add_argument(
+        "--motion", action="store_true", default=cfg.get("motion", False),
+        help="启用运动控制（识别到人按分类做动作，也可页面手动触发）"
     )
 
     parser.add_argument(
         "--log-level",
-        default="INFO",
+        default=cfg.get("log_level", "INFO"),
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="日志级别",
     )
@@ -117,15 +145,18 @@ def run_window(stream) -> None:
 def create_stream(args: argparse.Namespace):
     face_recognizer = None
     if args.face:
-        from pathlib import Path
-
         from go2x_stream.face import FaceRecognizer
 
-        base = Path(__file__).resolve().parent
         face_recognizer = FaceRecognizer(
-            model_root=base,
-            faces_dir=base / "faces",
+            model_root=resource_dir(),
+            faces_dir=app_dir() / "faces",
         )
+
+    motion = None
+    if args.motion:
+        from go2x_stream.motion import Go2Motion
+
+        motion = Go2Motion()
 
     if args.source == "dds":
         return Go2DdsStream(
@@ -133,7 +164,8 @@ def create_stream(args: argparse.Namespace):
             domain_id=args.domain_id,
             timeout=args.timeout,
         )
-    return Go2WebRtcStream(
+
+    stream = Go2WebRtcStream(
         ip=args.ip,
         serial_number=args.sn,
         aes_key=args.aes_key,
@@ -141,7 +173,12 @@ def create_stream(args: argparse.Namespace):
         face_recognizer=face_recognizer,
         say_cooldown=args.say_cooldown,
         face_interval=args.face_interval,
+        motion=motion,
     )
+    if motion is not None:
+        motion.attach(stream)
+        motion.start()
+    return stream
 
 
 def main() -> int:

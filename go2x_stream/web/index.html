@@ -138,6 +138,10 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   .saybar { display: flex; gap: 10px; }
+  .ip-input { width: 160px; flex-shrink: 0; }
+  .actionbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .actionbar-title { font-size: 13px; color: var(--muted); margin-right: 4px; }
+  .action-btn { padding: 8px 16px; font-size: 13px; }
   input[type="text"], input[type="file"] {
     font-family: inherit;
   }
@@ -181,6 +185,7 @@
     flex-wrap: wrap;
   }
   .faceform .name-input { width: 200px; }
+  .faceform .cat-input { width: 140px; flex-shrink: 0; }
   .file-input {
     flex: 1;
     min-width: 220px;
@@ -217,6 +222,14 @@
     border: 1px solid var(--border);
   }
   .face-name { margin-right: 2px; }
+  .face-cat {
+    font-size: 11px;
+    color: var(--accent);
+    background: #16243a;
+    padding: 1px 7px;
+    border-radius: 999px;
+    margin-right: 2px;
+  }
   .face-del {
     width: 20px;
     height: 20px;
@@ -264,6 +277,8 @@
           <h1>实时画面</h1>
           <span id="state" class="pill warn"><span class="dot"></span><span id="stateText">连接中</span></span>
           <span class="spacer"></span>
+          <input id="robotIp" class="text-input ip-input" type="text" placeholder="机器狗 IP">
+          <button id="connectBtn" class="btn btn-blue">连接</button>
           <span id="meta" class="meta">--</span>
         </header>
 
@@ -281,6 +296,18 @@
           <button id="sayBtn" class="btn btn-green">播报</button>
         </div>
 
+        <div class="actionbar">
+          <span class="actionbar-title">动作控制</span>
+          <button class="btn btn-blue action-btn" data-action="hello">挥手</button>
+          <button class="btn btn-blue action-btn" data-action="heart">比心</button>
+          <button class="btn btn-blue action-btn" data-action="dance1">跳舞1</button>
+          <button class="btn btn-blue action-btn" data-action="dance2">跳舞2</button>
+          <button class="btn btn-blue action-btn" data-action="sit">坐下</button>
+          <button class="btn btn-blue action-btn" data-action="standup">站立</button>
+          <button class="btn btn-blue action-btn" data-action="stretch">伸懒腰</button>
+          <span id="motionState" class="meta">--</span>
+        </div>
+
         <footer>数据每秒刷新一次 · 画面通过 MJPEG 实时推送</footer>
       </section>
 
@@ -292,9 +319,19 @@
 
         <div class="card">
           <h2>注册人脸</h2>
-          <p class="sub">上传一张正脸清晰的照片，识别到该人脸时机器狗会播报姓名。</p>
+          <p class="sub">上传一张正脸清晰的照片，识别到该人脸时机器狗会播报姓名并按分类做动作。</p>
           <div class="faceform">
             <input id="faceName" class="text-input name-input" type="text" placeholder="姓名（如 张三）" maxlength="50">
+            <select id="faceCategory" class="text-input cat-input">
+              <option value="">分类：仅播报</option>
+              <option value="hello">挥手</option>
+              <option value="heart">比心</option>
+              <option value="dance1">跳舞1</option>
+              <option value="dance2">跳舞2</option>
+              <option value="sit">坐下</option>
+              <option value="standup">站立</option>
+              <option value="stretch">伸懒腰</option>
+            </select>
             <input id="faceFile" class="file-input" type="file" accept="image/*">
             <button id="faceBtn" class="btn btn-blue">注册人脸</button>
           </div>
@@ -398,6 +435,49 @@
 
   const sayText = document.getElementById('sayText');
   const sayBtn = document.getElementById('sayBtn');
+
+  // ── 机器狗 IP 配置 + 连接 ────────────────────────────────────
+  const robotIp = document.getElementById('robotIp');
+  const connectBtn = document.getElementById('connectBtn');
+
+  async function loadConfig() {
+    try {
+      const r = await fetch('/api/config', { cache: 'no-store' });
+      const cfg = await r.json();
+      if (cfg.ip) robotIp.value = cfg.ip;
+    } catch (e) { /* 忽略 */ }
+  }
+  loadConfig();
+
+  async function doConnect() {
+    const ip = robotIp.value.trim();
+    if (!ip) { robotIp.focus(); return; }
+    connectBtn.disabled = true;
+    connectBtn.textContent = '连接中…';
+    try {
+      const r = await fetch('/api/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ip })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) {
+        setState('warn', '连接中');
+        detail.textContent = '已更新机器狗 IP，正在连接 ' + ip + ' ...';
+        refresh();
+      } else {
+        alert('连接失败：' + (data.detail || ('HTTP ' + r.status)));
+      }
+    } catch (e) {
+      alert('请求失败：' + e.message);
+    } finally {
+      connectBtn.disabled = false;
+      connectBtn.textContent = '连接';
+    }
+  }
+  connectBtn.addEventListener('click', doConnect);
+  robotIp.addEventListener('keydown', (e) => { if (e.key === 'Enter') doConnect(); });
+
   async function doSay() {
     const text = sayText.value.trim();
     if (!text) { sayText.focus(); return; }
@@ -421,8 +501,43 @@
   sayBtn.addEventListener('click', doSay);
   sayText.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSay(); });
 
+  // ── 动作控制 ────────────────────────────────────────────────
+  const motionState = document.getElementById('motionState');
+
+  async function doAction(action) {
+    try {
+      const r = await fetch('/api/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) alert('动作执行失败：' + (data.detail || ('HTTP ' + r.status)));
+    } catch (e) {
+      alert('请求失败：' + e.message);
+    }
+  }
+  document.querySelectorAll('.action-btn').forEach(btn => {
+    btn.addEventListener('click', () => doAction(btn.dataset.action));
+  });
+
+  async function refreshMotion() {
+    try {
+      const r = await fetch('/api/motion', { cache: 'no-store' });
+      const m = await r.json();
+      if (m.ready) motionState.textContent = '已就绪';
+      else if (m.error) motionState.textContent = '未就绪';
+      else motionState.textContent = '初始化中…';
+    } catch (e) {
+      motionState.textContent = '--';
+    }
+  }
+  refreshMotion();
+  setInterval(refreshMotion, 3000);
+
   // ── 人脸添加 ────────────────────────────────────────────────
   const faceName = document.getElementById('faceName');
+  const faceCategory = document.getElementById('faceCategory');
   const faceFile = document.getElementById('faceFile');
   const faceBtn = document.getElementById('faceBtn');
   const faceTags = document.getElementById('faceTags');
@@ -431,17 +546,25 @@
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='#2a3140'/><circle cx='50' cy='40' r='18' fill='#5f6775'/><ellipse cx='50' cy='82' rx='24' ry='16' fill='#5f6775'/></svg>"
   );
 
+  const CATEGORY_LABELS = {
+    hello: '挥手', heart: '比心', dance1: '跳舞1', dance2: '跳舞2',
+    sit: '坐下', standup: '站立', stretch: '伸懒腰'
+  };
+
   async function loadFaces() {
     try {
       const r = await fetch('/api/faces', { cache: 'no-store' });
-      const names = await r.json();
-      if (!names || names.length === 0) {
+      const faces = await r.json();
+      if (!faces || faces.length === 0) {
         faceTags.innerHTML = '<span class="face-empty">暂无已注册人脸</span>';
         return;
       }
-      faceTags.innerHTML = names.map(n =>
-        `<span class="face-tag"><img class="face-thumb" src="/api/face_image/${encodeURIComponent(n)}" alt="${n}" onerror="this.onerror=null;this.src=window.DEFAULT_AVATAR"><span class="face-name">${n}</span><button class="face-del" data-name="${n}" title="删除">×</button></span>`
-      ).join('');
+      faceTags.innerHTML = faces.map(f => {
+        const name = f.name || f;
+        const cat = CATEGORY_LABELS[f.category] || '';
+        const catTag = cat ? `<span class="face-cat">${cat}</span>` : '';
+        return `<span class="face-tag"><img class="face-thumb" src="/api/face_image/${encodeURIComponent(name)}" alt="${name}" onerror="this.onerror=null;this.src=window.DEFAULT_AVATAR"><span class="face-name">${name}</span>${catTag}<button class="face-del" data-name="${name}" title="删除">×</button></span>`;
+      }).join('');
     } catch (e) {
       faceTags.innerHTML = '<span class="face-empty">加载失败</span>';
     }
@@ -479,11 +602,13 @@
       const fd = new FormData();
       fd.append('name', name);
       fd.append('image', file);
+      fd.append('category', faceCategory.value);
       const r = await fetch('/api/register_face', { method: 'POST', body: fd });
       const data = await r.json().catch(() => ({}));
       if (r.ok) {
         alert('注册成功：' + name);
         faceName.value = '';
+        faceCategory.value = '';
         faceFile.value = '';
         loadFaces();
       } else {

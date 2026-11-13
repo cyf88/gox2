@@ -13,8 +13,9 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from pydantic import BaseModel
 
 from .frame import Frame
+from .paths import resource_dir
 
-_INDEX_HTML = (Path(__file__).with_name("web") / "index.html").read_text(encoding="utf-8")
+_INDEX_HTML = (resource_dir() / "go2x_stream" / "web" / "index.html").read_text(encoding="utf-8")
 
 # 上传的视频临时缓存：video_id -> 文件路径
 _VIDEOS: dict[str, str] = {}
@@ -32,6 +33,15 @@ class SayRequest(BaseModel):
     text: str
 
 
+class ConnectRequest(BaseModel):
+    ip: str
+    aes_key: str = ""
+
+
+class ActionRequest(BaseModel):
+    action: str
+
+
 def create_app(stream: VideoSource) -> FastAPI:
     app = FastAPI(title="Go2X 视频流")
 
@@ -42,6 +52,25 @@ def create_app(stream: VideoSource) -> FastAPI:
     @app.get("/api/status")
     async def status() -> JSONResponse:
         return JSONResponse(stream.status())
+
+    @app.get("/api/config")
+    async def get_config() -> JSONResponse:
+        """返回页面配置所需的机器狗 IP（AES 密钥不返回，仅 IP）。"""
+        st = stream.status()
+        return JSONResponse({"ip": st.get("ip", "")})
+
+    @app.post("/api/connect")
+    async def connect(req: ConnectRequest) -> JSONResponse:
+        connect_fn = getattr(stream, "connect", None)
+        if not callable(connect_fn):
+            raise HTTPException(status_code=400, detail="当前拉流方式不支持运行时切换 IP（仅 WebRTC 模式可用）")
+        try:
+            result = await asyncio.to_thread(
+                connect_fn, req.ip, req.aes_key or None
+            )
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
 
     @app.post("/api/say")
     async def say(req: SayRequest) -> JSONResponse:
@@ -54,14 +83,35 @@ def create_app(stream: VideoSource) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
+    @app.get("/api/motion")
+    async def motion_status() -> JSONResponse:
+        fn = getattr(stream, "motion_status", None)
+        return JSONResponse(fn() if callable(fn) else {"ready": False, "error": "未启用运动控制", "interface": "", "domain_id": 0})
+
+    @app.post("/api/action")
+    async def do_action(req: ActionRequest) -> JSONResponse:
+        """触发机器狗动作（如 hello/heart/dance1）。"""
+        fn = getattr(stream, "do_action", None)
+        if not callable(fn):
+            raise HTTPException(status_code=400, detail="当前模式不支持运动控制")
+        try:
+            result = await asyncio.to_thread(fn, req.action)
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
     @app.post("/api/register_face")
-    async def register_face(name: str = Form(...), image: UploadFile = File(...)):
+    async def register_face(
+        name: str = Form(...),
+        image: UploadFile = File(...),
+        category: str = Form(""),
+    ):
         register_fn = getattr(stream, "register_face", None)
         if not callable(register_fn):
             raise HTTPException(status_code=400, detail="当前模式不支持人脸注册（启动服务时需加 --face）")
         data = await image.read()
         try:
-            result = await asyncio.to_thread(register_fn, name, data)
+            result = await asyncio.to_thread(register_fn, name, data, category)
             return JSONResponse(result)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
@@ -136,19 +186,65 @@ def create_app(stream: VideoSource) -> FastAPI:
 
 
 async def _mjpeg(stream: VideoSource):
-    """每来一帧新画面就推送一次，无新帧时短暂等待。"""
+    """每来一帧新画面就推送一次，无新帧时短暂等待。
+
+    若支持人脸识别（detect_frame），按节流间隔检测并叠加人脸框，
+    检测结果在间隔内复用，避免每帧全量检测拖慢视频流。
+    """
+    import time
+
+    import cv2
+    import numpy as np
+
+    from .face import draw_boxes
+
+    detect_fn = getattr(stream, "detect_frame", None)
+    has_detect = callable(detect_fn)
     last_seq = -1
+    last_detect = 0.0
+    detect_interval = 0.5  # 秒
+    cached_results: list = []
     while True:
         frame = stream.latest_frame()
         if frame is None or frame.seq == last_seq:
             await asyncio.sleep(0.01)
             continue
         last_seq = frame.seq
+        jpeg = frame.jpeg
+
+        if has_detect:
+            now = time.monotonic()
+            if now - last_detect >= detect_interval:
+                last_detect = now
+                try:
+                    img = cv2.imdecode(
+                        np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR
+                    )
+                    if img is not None:
+                        cached_results = await asyncio.to_thread(detect_fn, img)
+                except Exception:
+                    cached_results = []
+            if cached_results:
+                try:
+                    img = cv2.imdecode(
+                        np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR
+                    )
+                    if img is not None:
+                        img = draw_boxes(img, cached_results)
+                        ok, buf = cv2.imencode(
+                            ".jpg", img,
+                            [int(cv2.IMWRITE_JPEG_QUALITY), 85],
+                        )
+                        if ok:
+                            jpeg = buf.tobytes()
+                except Exception:
+                    pass
+
         yield (
             b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
-            + str(len(frame.jpeg)).encode()
+            + str(len(jpeg)).encode()
             + b"\r\n\r\n"
-            + frame.jpeg
+            + jpeg
             + b"\r\n"
         )
 
