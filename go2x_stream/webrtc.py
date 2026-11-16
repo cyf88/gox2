@@ -28,7 +28,7 @@ from unitree_webrtc_connect.constants import RTC_TOPIC
 from unitree_webrtc_connect.multicast_scanner import discover_ip_sn
 
 from .frame import Frame
-from .tts import synthesize_wav, write_temp_wav
+from .tts import prepare_wav, prewarm
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,18 @@ class Go2WebRtcStream:
         self._last_said: dict[str, float] = {}
         self._face_stop = threading.Event()
         self._face_thread: Optional[threading.Thread] = None
+        # 人脸检测结果缓存（供 MJPEG 叠加框复用，避免重复推理）
+        self._face_lock = threading.Lock()
+        self._face_results: list = []
+        self._face_seq = -1
+
+        # 音频采集（机器狗麦克风 → WebSocket 推给网页播放）
+        self._audio_lock = threading.Lock()
+        self._audio_chunks: deque[bytes] = deque(maxlen=100)
+        self._audio_seq = 0
+        self._audio_rate = 48000
+        self._audio_clients = 0
+        self._audio_logged = False
 
         # 运动控制（可选，WebRTC sport 通道）
         self._motion = motion
@@ -130,6 +142,35 @@ class Go2WebRtcStream:
                 target=self._face_loop, name="go2-face-recognize", daemon=True
             )
             self._face_thread.start()
+
+        # 后台预生成已有播报文本的语音（不阻塞启动）
+        if self._face_recognizer is not None or self._custom_actions is not None:
+            threading.Thread(
+                target=self._prewarm_tts, name="go2-tts-prewarm", daemon=True
+            ).start()
+
+    def _prewarm_tts(self) -> None:
+        """预生成所有可能用到的播报语音，首次识别时无需等待合成。"""
+        try:
+            texts: list[str] = []
+            if self._custom_actions is not None:
+                for item in self._custom_actions.list_actions():
+                    say = (item.get("say") or "").strip()
+                    if say:
+                        texts.append(say)
+            if self._face_recognizer is not None:
+                texts.extend(f"识别到{n}" for n in self._face_recognizer.registered_names())
+            if not texts:
+                return
+            done = 0
+            for text in texts:
+                if self._stop.is_set():
+                    break
+                if prewarm(text):
+                    done += 1
+            logger.info("已预生成 %d 条播报语音", done)
+        except Exception as exc:
+            logger.warning("预生成语音失败: %s", exc)
 
     def stop(self) -> None:
         """停止拉流并等待线程退出。"""
@@ -234,6 +275,8 @@ class Go2WebRtcStream:
         if img is None:
             raise RuntimeError("无法解码图片，请上传 JPG/PNG 格式")
         self._face_recognizer.register_image(name, img)
+        # 预生成默认播报语音，识别时无需再合成
+        prewarm(f"识别到{name}")
         return {"ok": True, "name": name}
 
     def registered_faces(self) -> list[dict]:
@@ -310,7 +353,11 @@ class Go2WebRtcStream:
         """新建或覆盖一个自定义动作（动作序列 + 播报文本）。"""
         if self._custom_actions is None:
             raise RuntimeError("未启用自定义动作存储")
-        return self._custom_actions.save(name, say, steps)
+        result = self._custom_actions.save(name, say, steps)
+        # 保存时预生成语音，识别到人时直接上传，无需现场合成
+        if (say or "").strip():
+            result["tts_ready"] = prewarm(say)
+        return result
 
     def delete_custom_action(self, name: str) -> dict:
         """删除一个自定义动作。"""
@@ -348,15 +395,23 @@ class Go2WebRtcStream:
                 pass
 
     def detect_frame(self, frame) -> list:
-        """检测单帧图像，返回 [(姓名, 相似度, bbox)]（供画框展示）。"""
+        """检测单帧图像，返回 [(姓名, 相似度, bbox)]（供离线视频检测使用）。"""
         if self._face_recognizer is None:
             return []
         return self._face_recognizer.detect_with_boxes(frame)
 
+    def latest_detections(self) -> tuple[int, list]:
+        """返回最近一次人脸检测的 (帧序号, [(姓名, 相似度, bbox)])。
+
+        画面叠加直接复用该缓存，避免每个 MJPEG 客户端各自跑一遍推理。
+        """
+        with self._face_lock:
+            return self._face_seq, list(self._face_results)
+
     # ─── 人脸识别 ───────────────────────────────────────────────
 
     def _face_loop(self) -> None:
-        """人脸识别循环：定时从最新帧检测并识别，识别到人时去重播报。"""
+        """人脸识别循环：定时检测一次，结果缓存给画面叠加并触发播报。"""
         import numpy as np
 
         while not self._face_stop.is_set():
@@ -367,9 +422,12 @@ class Go2WebRtcStream:
                         np.frombuffer(frame.jpeg, dtype=np.uint8), cv2.IMREAD_COLOR
                     )
                     if img is not None:
-                        results = self._face_recognizer.recognize(img)
+                        results = self._face_recognizer.detect_and_identify(img)
+                        with self._face_lock:
+                            self._face_results = results
+                            self._face_seq = frame.seq
                         if results:
-                            name, sim = results[0]
+                            name, sim, _ = max(results, key=lambda r: r[1])
                             now = time.monotonic()
                             if now - self._last_said.get(name, 0.0) >= self._say_cooldown:
                                 self._last_said[name] = now
@@ -388,7 +446,7 @@ class Go2WebRtcStream:
         except Exception as exc:
             logger.warning("播报失败: %s", exc)
 
-        if custom and self._motion is not None:
+        if custom and custom.get("steps") and self._motion is not None:
             try:
                 self._motion.do_sequence(custom.get("steps") or [])
             except Exception as exc:
@@ -396,20 +454,20 @@ class Go2WebRtcStream:
 
     async def _say_async(self, text: str) -> dict:
         conn = self._conn
-        # TTS 合成是阻塞调用，放到线程池避免卡住事件循环
-        wav = await asyncio.to_thread(synthesize_wav, text)
-        path = write_temp_wav(wav)
+        # 已预生成则直接复用缓存文件；否则现场合成（阻塞调用放线程池）
+        path, is_temp = await asyncio.to_thread(prepare_wav, text)
         try:
             unique_id = await self._upload_and_play(conn, path)
             logger.info("已触发播报, unique_id=%s", unique_id)
             return {"ok": True, "unique_id": unique_id}
         finally:
-            try:
-                from pathlib import Path
+            if is_temp:
+                try:
+                    from pathlib import Path
 
-                Path(path).unlink(missing_ok=True)
-            except OSError:
-                pass
+                    Path(path).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     async def _upload_and_play(self, conn, path: str) -> str:
         """上传 WAV 到机器狗 audiohub 并触发播放，返回唯一 ID。
@@ -423,6 +481,7 @@ class Go2WebRtcStream:
         audio_data = Path(path).read_bytes()
         file_md5 = hashlib.md5(audio_data).hexdigest()
         b64_data = base64.b64encode(audio_data).decode("utf-8")
+        # 注意：WebRTC 数据通道单条消息上限 65536 字节，块不能超过该值
         chunks = [b64_data[i : i + 61440] for i in range(0, len(b64_data), 61440)]
         total_chunks = len(chunks)
         file_name = Path(path).stem
@@ -444,15 +503,14 @@ class Go2WebRtcStream:
                 "rt/api/audiohub/request",
                 {"api_id": 2001, "parameter": json.dumps(parameter, ensure_ascii=True)},
             )
-            await asyncio.sleep(0.02)
+            if i < total_chunks:
+                await asyncio.sleep(0.005)
 
-        # 上传响应里只有 current_block_index，不包含文件唯一 ID；
-        # 需要再查询音频列表，按文件名匹配出刚上传的那条记录。
+        # 上传响应里通常只有 current_block_index，需要查列表按文件名匹配 unique_id
         list_response = await pub_sub.publish_request_new(
             "rt/api/audiohub/request",
             {"api_id": 1001, "parameter": json.dumps({})},
         )
-        logger.info("音频列表响应: %s", list_response)
         unique_id = self._find_audio_id(list_response, file_name)
         if not unique_id:
             unique_id = self._extract_unique_id(last_response)
@@ -603,6 +661,8 @@ class Go2WebRtcStream:
 
                 conn.video.add_track_callback(self._receive_video)
                 conn.video.switchVideoChannel(True)
+                conn.audio.add_track_callback(self._receive_audio)
+                conn.audio.switchAudioChannel(True)
 
                 while not self._stop.is_set():
                     if not conn.isConnected:
@@ -665,6 +725,82 @@ class Go2WebRtcStream:
                 height=frame.height,
             )
             self._frame_times.append(time.monotonic())
+
+    async def _receive_audio(self, frame) -> None:
+        """把机器狗麦克风音频帧转成 16bit 单声道 PCM，缓存供网页拉取。"""
+        with self._audio_lock:
+            if self._audio_clients <= 0:
+                return
+        try:
+            import numpy as np
+
+            pcm = frame.to_ndarray()
+            if not self._audio_logged:
+                self._audio_logged = True
+                logger.info(
+                    "音频帧格式: rate=%s layout=%s dtype=%s shape=%s",
+                    frame.sample_rate, getattr(frame.layout, "name", "?"),
+                    pcm.dtype, pcm.shape,
+                )
+            if pcm.dtype != np.int16:
+                pcm = np.clip(pcm * 32767.0, -32768, 32767).astype(np.int16)
+            channels = int(getattr(frame.layout, "nb_channels", 1) or 1)
+            if pcm.ndim == 2 and channels > 1 and pcm.shape[0] == channels:
+                # 平面格式：(channels, samples)，按声道取均值
+                pcm = pcm.mean(axis=0).astype(np.int16)
+            else:
+                flat = pcm.reshape(-1)
+                if channels > 1 and flat.size and flat.size % channels == 0:
+                    # 打包格式：交错存放 (samples*channels,)，重排后取均值
+                    pcm = flat.reshape(-1, channels).mean(axis=1).astype(np.int16)
+                else:
+                    pcm = flat
+            data = pcm.tobytes()
+        except Exception as exc:
+            logger.debug("音频帧转换失败: %s", exc)
+            return
+        with self._audio_lock:
+            self._audio_rate = int(getattr(frame, "sample_rate", 0) or self._audio_rate)
+            self._audio_chunks.append(data)
+            self._audio_seq += 1
+
+    # ─── 音频对外接口（供 WebSocket 使用）────────────────────────
+
+    def audio_begin(self) -> None:
+        """登记一个音频客户端；从此刻起开始缓存音频。"""
+        with self._audio_lock:
+            self._audio_chunks.clear()
+            self._audio_clients += 1
+
+    def audio_end(self) -> None:
+        with self._audio_lock:
+            self._audio_clients = max(0, self._audio_clients - 1)
+
+    def audio_seq(self) -> int:
+        with self._audio_lock:
+            return self._audio_seq
+
+    def audio_info(self) -> dict:
+        with self._audio_lock:
+            return {
+                "rate": self._audio_rate,
+                "channels": 1,
+                "clients": self._audio_clients,
+            }
+
+    def audio_read(self, since: int) -> tuple[int, int, bytes]:
+        """返回 (当前序号, 采样率, 自 since 之后的新增 PCM 字节)。"""
+        with self._audio_lock:
+            seq = self._audio_seq
+            rate = self._audio_rate
+            if since >= seq:
+                return seq, rate, b""
+            pending = seq - since
+            chunks = list(self._audio_chunks)
+            if pending > len(chunks):
+                # 客户端落后过多，只给当前缓存里的全部
+                pending = len(chunks)
+            return seq, rate, b"".join(chunks[-pending:]) if pending else b""
 
     # ─── 内部工具 ───────────────────────────────────────────────
 

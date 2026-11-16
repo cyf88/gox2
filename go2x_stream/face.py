@@ -29,18 +29,35 @@ class FaceRecognizer:
         model_root: Path,
         faces_dir: Path,
         threshold: float = _DEFAULT_THRESHOLD,
-        det_size: int = 640,
+        det_size: int = 480,
+        num_threads: int = 2,
+        max_detect_width: int = 640,
     ) -> None:
+        import onnxruntime
         from insightface.app import FaceAnalysis
 
-        self._app = FaceAnalysis(name=_MODEL_NAME, root=str(model_root))
+        # 限制推理线程数：默认 ONNX 会用满全部核心，导致 CPU 打满
+        sess_options = onnxruntime.SessionOptions()
+        sess_options.intra_op_num_threads = max(1, int(num_threads))
+        sess_options.inter_op_num_threads = 1
+        sess_options.graph_optimization_level = (
+            onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+        )
+        self._app = FaceAnalysis(
+            name=_MODEL_NAME, root=str(model_root), sess_options=sess_options
+        )
         # ctx_id=-1 使用 CPU（普通 onnxruntime）；如需 GPU 改 0 并安装 onnxruntime-gpu
         self._app.prepare(ctx_id=-1, det_size=(det_size, det_size))
         self._faces_dir = Path(faces_dir)
         self._faces_dir.mkdir(parents=True, exist_ok=True)
         self._threshold = threshold
+        self._max_detect_width = max_detect_width
         self._registry: dict[str, np.ndarray] = {}
         self._load_registry()
+        logger.info(
+            "人脸识别就绪（det_size=%d，推理线程=%d，检测图最大宽度=%d）",
+            det_size, num_threads, max_detect_width,
+        )
 
     # ─── 人脸库管理 ─────────────────────────────────────────────
 
@@ -123,36 +140,42 @@ class FaceRecognizer:
 
     # ─── 识别 ───────────────────────────────────────────────────
 
-    def recognize(self, frame: np.ndarray) -> list[tuple[str, float]]:
-        """识别画面中的所有已知人脸，返回 [(姓名, 相似度)]。
+    def detect_and_identify(self, frame: np.ndarray) -> list[tuple[str, float, list[int]]]:
+        """检测 + 识别一次推理，返回 [(姓名, 相似度, bbox)]，bbox 为原始帧坐标。
 
-        相似度为余弦相似度（0~1，越大越像）。未注册的人脸不会被返回。
+        输入会先缩到 max_detect_width 宽再推理，显著降低 CPU 开销。
         """
         if not self._registry:
             return []
-        faces = self._app.get(frame)
-        results: list[tuple[str, float]] = []
+        h, w = frame.shape[:2]
+        scale = 1.0
+        img = frame
+        if self._max_detect_width and w > self._max_detect_width:
+            scale = self._max_detect_width / float(w)
+            img = cv2.resize(
+                frame, (self._max_detect_width, int(h * scale)),
+                interpolation=cv2.INTER_AREA,
+            )
+        faces = self._app.get(img)
+        results: list[tuple[str, float, list[int]]] = []
         for face in faces:
             name, sim = self._match(face.normed_embedding)
-            if name is not None:
-                results.append((name, sim))
+            if name is None:
+                continue
+            bbox = [int(v / scale) for v in face.bbox]
+            results.append((name, round(sim, 2), bbox))
         return results
+
+    def recognize(self, frame: np.ndarray) -> list[tuple[str, float]]:
+        """识别画面中的所有已知人脸，返回 [(姓名, 相似度)]。"""
+        return [(name, sim) for name, sim, _ in self.detect_and_identify(frame)]
 
     def detect_with_boxes(self, frame: np.ndarray) -> list[tuple[str, float, list[int]]]:
         """检测并识别画面中的已知人脸，返回 [(姓名, 相似度, bbox)]。
 
         bbox 为 [x1, y1, x2, y2]（整数像素坐标）。
         """
-        if not self._registry:
-            return []
-        faces = self._app.get(frame)
-        results: list[tuple[str, float, list[int]]] = []
-        for face in faces:
-            name, sim = self._match(face.normed_embedding)
-            if name is not None:
-                bbox = [int(v) for v in face.bbox]
-                results.append((name, round(sim, 2), bbox))
-        return results
+        return self.detect_and_identify(frame)
 
     def detect_video(self, video_path: str, frame_step: int = 10) -> dict:
         """对离线视频隔帧检测并识别，返回识别结果汇总。

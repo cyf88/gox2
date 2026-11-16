@@ -388,6 +388,7 @@
           <span class="spacer"></span>
           <input id="robotIp" class="text-input ip-input" type="text" placeholder="机器狗 IP">
           <button id="connectBtn" class="btn btn-blue">连接</button>
+          <button id="audioBtn" class="btn btn-blue" style="padding:9px 16px;font-size:13px">🔊 声音</button>
           <span id="meta" class="meta">--</span>
         </header>
 
@@ -560,7 +561,7 @@
         <!-- 自定义动作 -->
         <div class="seq-editor">
           <h2>🎬 自定义动作</h2>
-          <p class="sub" style="margin:0 0 12px">定义一个动作序列 + 播报文本，保存后可绑定给任意已注册人员。识别到该人时先播报文本，再执行动作序列。</p>
+          <p class="sub" style="margin:0 0 12px">定义一个动作序列 + 播报文本，保存后可绑定给任意已注册人员。识别到该人时先播报文本，再执行动作序列。<b>动作步骤可以留空，此时只播报语音。</b></p>
 
           <div class="seq-add-row">
             <input id="caName" type="text" placeholder="动作名称（如 迎宾）" maxlength="30" style="width:170px">
@@ -964,7 +965,7 @@
 
   function renderCaSteps() {
     if (caSteps.length === 0) {
-      caStepList.innerHTML = '<div class="seq-item" style="justify-content:center;color:var(--muted)">还没有动作步骤</div>';
+      caStepList.innerHTML = '<div class="seq-item" style="justify-content:center;color:var(--muted)">未添加动作步骤（保存后仅播报语音）</div>';
       return;
     }
     caStepList.innerHTML = caSteps.map((step, idx) => {
@@ -1024,14 +1025,17 @@
         caList.innerHTML = '<span class="face-empty">还没有自定义动作</span>';
         return;
       }
-      caList.innerHTML = customActionsCache.map(a => `
+      caList.innerHTML = customActionsCache.map(a => {
+        const stepCount = (a.steps || []).length;
+        return `
         <span class="face-tag">
           <span class="face-name">${esc(a.name)}</span>
-          <span class="face-cat">${(a.steps || []).length} 步</span>
+          <span class="face-cat">${stepCount ? stepCount + ' 步' : '仅播报'}</span>
           ${a.say ? `<span style="color:var(--muted);font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">“${esc(a.say)}”</span>` : ''}
           <button class="face-edit" data-name="${esc(a.name)}" title="编辑">✎</button>
           <button class="face-del" data-name="${esc(a.name)}" title="删除">×</button>
-        </span>`).join('');
+        </span>`;
+      }).join('');
     } catch (e) {
       caList.innerHTML = '<span class="face-empty">加载失败</span>';
     }
@@ -1072,8 +1076,13 @@
 
   document.getElementById('btnCaSave').addEventListener('click', async () => {
     const name = caName.value.trim();
+    const say = caSay.value.trim();
     if (!name) { caName.focus(); return; }
-    if (caSteps.length === 0) { alert('请至少添加一步动作'); return; }
+    if (caSteps.length === 0 && !say) {
+      alert('请填写播报文本，或至少添加一步动作');
+      caSay.focus();
+      return;
+    }
     try {
       const r = await fetch('/api/custom_actions', {
         method: 'POST',
@@ -1086,7 +1095,9 @@
         return;
       }
       caEditingName = name;
-      caEditing.textContent = `已保存：${name}`;
+      caEditing.textContent = data.tts_ready === false
+        ? `已保存：${name}（语音生成失败，运行时再合成）`
+        : `已保存：${name}（语音已预生成）`;
       await loadCustomActions();
       loadFaces();  // 人员下拉同步刷新
     } catch (e) {
@@ -1434,6 +1445,86 @@
       { stop_move: true },
     ];
     renderSeq();
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // 机器狗麦克风音频播放（WebSocket + Web Audio）
+  // ══════════════════════════════════════════════════════════════
+  const audioBtn = document.getElementById('audioBtn');
+  let audioCtx = null;
+  let audioWs = null;
+  let audioRate = 48000;
+  let audioPlayTime = 0;
+
+  function playPcm(int16) {
+    if (!audioCtx || !int16 || int16.length === 0) return;
+    const buf = audioCtx.createBuffer(1, int16.length, audioRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < int16.length; i++) ch[i] = int16[i] / 32768;
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(audioCtx.destination);
+    const now = audioCtx.currentTime;
+    // 留 150ms 抖动缓冲；播出时间已落后则顺延，避免重叠杂音
+    if (audioPlayTime < now + 0.02) audioPlayTime = now + 0.15;
+    if (audioPlayTime > now + 1.5) audioPlayTime = now + 0.15;
+    src.start(audioPlayTime);
+    audioPlayTime += buf.duration;
+  }
+
+  function setAudioBtn(on) {
+    audioBtn.textContent = on ? '🔇 关闭声音' : '🔊 声音';
+    audioBtn.classList.toggle('btn-red', on);
+    audioBtn.classList.toggle('btn-blue', !on);
+  }
+
+  async function startAudio() {
+    audioCtx = new AudioContext();
+    if (audioCtx.state === 'suspended') {
+      try { await audioCtx.resume(); } catch (e) {}
+    }
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    audioWs = new WebSocket(`${proto}://${location.host}/ws/audio`);
+    audioWs.binaryType = 'arraybuffer';
+    audioPlayTime = 0;
+    audioWs.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {
+        try {
+          const info = JSON.parse(ev.data);
+          if (info.rate && info.rate !== audioRate) {
+            audioRate = info.rate;
+            audioCtx.close();
+            audioCtx = new AudioContext({ sampleRate: audioRate });
+            audioCtx.resume().catch(() => {});
+            audioPlayTime = 0;
+          }
+        } catch (e) { /* 忽略非 JSON */ }
+        return;
+      }
+      playPcm(new Int16Array(ev.data));
+    };
+    audioWs.onclose = () => setAudioBtn(false);
+  }
+
+  function stopAudio() {
+    if (audioWs) { audioWs.onclose = null; audioWs.close(); audioWs = null; }
+    if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
+  }
+
+  audioBtn.addEventListener('click', async () => {
+    if (audioBtn.textContent.includes('关闭')) {
+      stopAudio();
+      setAudioBtn(false);
+      return;
+    }
+    try {
+      await startAudio();
+      setAudioBtn(true);
+    } catch (e) {
+      alert('无法开启声音：' + e.message);
+      stopAudio();
+      setAudioBtn(false);
+    }
   });
 
   renderSeq();

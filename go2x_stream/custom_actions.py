@@ -54,17 +54,22 @@ class CustomActionStore:
             return {"name": name, "say": item.get("say", ""), "steps": item.get("steps", [])}
 
     def save(self, name: str, say: str, steps: list) -> dict:
-        """新建或覆盖一个自定义动作。"""
+        """新建或覆盖一个自定义动作。
+
+        steps 可以为空列表，表示只播报语音、不做动作。
+        """
         name = str(name or "").strip()
         if not name:
             raise ValueError("名称不能为空")
         if len(name) > MAX_NAME_LEN:
             raise ValueError(f"名称不能超过 {MAX_NAME_LEN} 个字符")
-        if not isinstance(steps, list) or not steps:
-            raise ValueError("动作序列不能为空")
+        if not isinstance(steps, list):
+            steps = []
         say = str(say or "").strip()
         if len(say) > MAX_SAY_LEN:
             raise ValueError(f"播报文本不能超过 {MAX_SAY_LEN} 个字符")
+        if not steps and not say:
+            raise ValueError("播报文本和动作序列至少填写一项")
         with self._lock:
             self._actions[name] = {"say": say, "steps": steps}
             self._save_locked()

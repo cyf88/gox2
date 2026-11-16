@@ -9,6 +9,8 @@
   "face": true,
   "say_cooldown": 5.0,
   "face_interval": 1.0,
+  "face_det_size": 480,
+  "face_threads": 2,
   "motion": true,
   "log_level": "INFO"
 }

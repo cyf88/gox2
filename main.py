@@ -97,7 +97,15 @@ def parse_args() -> argparse.Namespace:
     )
     face.add_argument(
         "--face-interval", type=float, default=cfg.get("face_interval", 1.0),
-        help="人脸识别间隔（秒），默认 1",
+        help="人脸识别间隔（秒），默认 1；调大可显著降低 CPU",
+    )
+    face.add_argument(
+        "--face-det-size", type=int, default=cfg.get("face_det_size", 480),
+        help="人脸检测模型输入尺寸，默认 480（越小越快，640 更准）",
+    )
+    face.add_argument(
+        "--face-threads", type=int, default=cfg.get("face_threads", 2),
+        help="人脸推理线程数，默认 2；设 1 最省 CPU",
     )
 
     motion = parser.add_argument_group("运动控制（WebRTC sport）")
@@ -151,6 +159,8 @@ def create_stream(args: argparse.Namespace):
         face_recognizer = FaceRecognizer(
             model_root=resource_dir(),
             faces_dir=app_dir() / "faces",
+            det_size=args.face_det_size,
+            num_threads=args.face_threads,
         )
 
     if args.face or args.motion:
@@ -198,6 +208,18 @@ def main() -> int:
     # aiortc/aioice 会对每个不可用的本地地址打印 INFO，噪声较大
     for name in ("aiortc", "aioice", "aioice.ice"):
         logging.getLogger(name).setLevel(logging.WARNING)
+
+    # 库对每个音频帧都会 logging.info("Receiving audio frame")，过滤掉避免刷屏
+    class _DropAudioFrameLog(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return record.getMessage() != "Receiving audio frame"
+
+    logging.getLogger().addFilter(_DropAudioFrameLog())
+
+    # 语音预生成缓存目录：编辑自定义动作/注册人脸时落盘，播报时直接复用
+    from go2x_stream.tts import configure_cache
+
+    configure_cache(app_dir() / "faces" / "tts_cache")
 
     stream = create_stream(args)
     stream.start()
