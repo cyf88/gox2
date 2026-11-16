@@ -12,5 +12,21 @@
   "face_det_size": 480,
   "face_threads": 2,
   "motion": true,
+  "chat": {
+    "enabled": true,
+    "wake_word": "小狗小狗",
+    "api_key": "",
+    "model": "deepseek-chat",
+    "base_url": "https://api.deepseek.com",
+    "system_prompt": "你是一只叫小黑的四足机器狗，性格活泼友好。用简短口语化的中文回答，每次不超过两句话。",
+    "history_rounds": 6,
+    "asr_model": "small",
+    "asr_threads": 2,
+    "vad_rms": 500,
+    "silence_ms": 600,
+    "max_utterance_ms": 8000,
+    "session_idle_s": 20,
+    "ack_text": "我在"
+  },
   "log_level": "INFO"
 }

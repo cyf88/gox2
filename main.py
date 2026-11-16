@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 
 # 打包后的 exe 控制台默认 GBK 编码，unitree 库会打印 emoji，需强制 UTF-8
@@ -150,9 +151,63 @@ def run_window(stream) -> None:
     cv2.destroyAllWindows()
 
 
+def create_chat(stream, cfg: dict):
+    """按配置创建语音对话服务（唤醒词 + 本地 ASR + DeepSeek）。"""
+    if not cfg or not cfg.get("enabled"):
+        return None
+    if not hasattr(stream, "add_audio_sink"):
+        logging.warning("当前拉流方式不支持麦克风音频，语音对话未启动")
+        return None
+
+    from go2x_stream.chat import AsrEngine, ChatClient, VoiceChat
+    from go2x_stream.tts import prewarm
+
+    api_key = (cfg.get("api_key") or os.environ.get("DEEPSEEK_API_KEY", "")).strip()
+    if not api_key:
+        logging.warning("未配置 chat.api_key（或环境变量 DEEPSEEK_API_KEY），对话只能识别不能回答")
+
+    asr = AsrEngine(
+        model_size=cfg.get("asr_model", "small"),
+        threads=int(cfg.get("asr_threads", 2)),
+    )
+    client = ChatClient(
+        api_key=api_key,
+        model=cfg.get("model", "deepseek-chat"),
+        base_url=cfg.get("base_url", "https://api.deepseek.com"),
+        system_prompt=cfg.get("system_prompt", ""),
+        history_rounds=int(cfg.get("history_rounds", 6)),
+    )
+    def _on_toggle(enabled: bool) -> None:
+        # 对话关闭时摘掉音频 sink，机器狗可停止推送音频，省 CPU
+        if enabled:
+            stream.add_audio_sink(chat.feed)
+        else:
+            stream.remove_audio_sink(chat.feed)
+
+    chat = VoiceChat(
+        say=stream.say,
+        asr=asr,
+        chat=client,
+        wake_word=cfg.get("wake_word", "小狗小狗"),
+        vad_rms=float(cfg.get("vad_rms", 500)),
+        silence_ms=int(cfg.get("silence_ms", 600)),
+        max_utterance_ms=int(cfg.get("max_utterance_ms", 8000)),
+        session_idle_s=float(cfg.get("session_idle_s", 20)),
+        ack_text=cfg.get("ack_text", "我在"),
+        on_enabled_change=_on_toggle,
+    )
+    stream.add_audio_sink(chat.feed)
+    chat.start()
+    prewarm(chat.ack_text)  # 唤醒应答语预生成
+    return chat
+
+
 def create_stream(args: argparse.Namespace):
     face_recognizer = None
     custom_actions = None
+    face_trigger = None
+    face_stop_store = None
+    patrol_store = None
     if args.face:
         from go2x_stream.face import FaceRecognizer
 
@@ -163,8 +218,16 @@ def create_stream(args: argparse.Namespace):
             num_threads=args.face_threads,
         )
 
+        from go2x_stream.face_trigger import FaceStopStore, FaceTriggerStore
+
+        face_trigger = FaceTriggerStore(data_dir=app_dir() / "faces")
+        face_stop_store = FaceStopStore(data_dir=app_dir() / "faces")
+
     if args.face or args.motion:
         from go2x_stream.custom_actions import CustomActionStore
+        from go2x_stream.patrol import PatrolStore
+
+        patrol_store = PatrolStore(data_dir=app_dir() / "faces")
 
         custom_actions = CustomActionStore(data_dir=app_dir() / "faces")
 
@@ -191,6 +254,9 @@ def create_stream(args: argparse.Namespace):
         face_interval=args.face_interval,
         motion=motion,
         custom_actions=custom_actions,
+        face_trigger=face_trigger,
+        face_stop_store=face_stop_store,
+        patrol_store=patrol_store,
     )
     if motion is not None:
         motion.attach(stream)
@@ -224,6 +290,10 @@ def main() -> int:
     stream = create_stream(args)
     stream.start()
 
+    chat = None
+    if args.source == "webrtc":
+        chat = create_chat(stream, load_config().get("chat") or {})
+
     try:
         if args.display == "window":
             run_window(stream)
@@ -233,7 +303,7 @@ def main() -> int:
             shown_host = "127.0.0.1" if args.host == "0.0.0.0" else args.host
             print(f"浏览器打开 http://{shown_host}:{args.port}", flush=True)
             uvicorn.run(
-                create_app(stream),
+                create_app(stream, chat=chat),
                 host=args.host,
                 port=args.port,
                 log_level="warning",
@@ -241,6 +311,8 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if chat is not None:
+            chat.stop()
         stream.stop()
     return 0
 

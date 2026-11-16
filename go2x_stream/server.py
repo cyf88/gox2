@@ -58,7 +58,58 @@ class AssignActionRequest(BaseModel):
     action: str = ""
 
 
-def create_app(stream: VideoSource) -> FastAPI:
+class ChatAskRequest(BaseModel):
+    text: str
+
+
+class ChatToggleRequest(BaseModel):
+    enabled: bool
+
+
+class FaceTriggerRequest(BaseModel):
+    enabled: bool = False
+    say: str = ""
+    steps: list = []
+    cooldown: float = 10.0
+
+
+class FaceStopRequest(BaseModel):
+    enabled: bool = True
+    seconds: float = 3.0
+
+
+class PatrolRequest(BaseModel):
+    action: str  # start / stop
+    mode: str = "route"  # route（按已保存路线）/ simple（参数化前进+转向）
+    vx: float = 0.5
+    vyaw: float = 0.6
+    forward_s: float = 4.0
+    turn_s: float = 2.0
+
+
+class PatrolRouteRequest(BaseModel):
+    steps: list = []
+    loop: bool = True
+
+
+class MoveRequest(BaseModel):
+    vx: float = 0.0
+    vy: float = 0.0
+    vyaw: float = 0.0
+
+
+class SequenceRequest(BaseModel):
+    steps: list
+
+
+class RawSportRequest(BaseModel):
+    topic: str = "rt/api/sport/request"
+    api_id: int
+    parameter: dict = {}
+    priority: bool = False
+
+
+def create_app(stream: VideoSource, chat=None) -> FastAPI:
     app = FastAPI(title="Go2X 视频流")
 
     @app.get("/", response_class=HTMLResponse)
@@ -116,6 +167,20 @@ def create_app(stream: VideoSource) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
+    @app.post("/api/raw_sport")
+    async def raw_sport(req: RawSportRequest) -> JSONResponse:
+        """调试：向任意 rt/api/*/request 主题下发一条请求。"""
+        fn = getattr(stream, "raw_request", None)
+        if not callable(fn):
+            raise HTTPException(status_code=400, detail="当前模式不支持数据通道指令")
+        try:
+            result = await asyncio.to_thread(
+                fn, req.topic, req.api_id, req.parameter, 8.0, req.priority
+            )
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
     @app.get("/api/actions")
     async def list_actions() -> JSONResponse:
         """返回所有可用动作列表（给前端组合编辑器）。"""
@@ -123,11 +188,6 @@ def create_app(stream: VideoSource) -> FastAPI:
         if not callable(fn):
             return JSONResponse({"actions": [], "velocity_range": {}})
         return JSONResponse(fn())
-
-    class MoveRequest(BaseModel):
-        vx: float = 0.0
-        vy: float = 0.0
-        vyaw: float = 0.0
 
     @app.post("/api/move")
     async def move(req: MoveRequest) -> JSONResponse:
@@ -153,8 +213,56 @@ def create_app(stream: VideoSource) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
-    class SequenceRequest(BaseModel):
-        steps: list
+    @app.post("/api/patrol")
+    async def patrol(req: PatrolRequest) -> JSONResponse:
+        """开始/停止巡逻（巡逻期间检测到人脸会自动暂停）。"""
+        action = (req.action or "").lower()
+        if action == "start":
+            if (req.mode or "route").lower() == "route":
+                fn = getattr(stream, "patrol_route_start", None)
+                if not callable(fn):
+                    raise HTTPException(status_code=400, detail="当前模式不支持巡逻路线")
+                try:
+                    result = await asyncio.to_thread(fn)
+                    return JSONResponse(result)
+                except Exception as exc:
+                    raise HTTPException(status_code=400, detail=str(exc))
+            fn = getattr(stream, "patrol_start", None)
+            if not callable(fn):
+                raise HTTPException(status_code=400, detail="当前模式不支持运动控制")
+            try:
+                result = await asyncio.to_thread(
+                    fn, req.vx, req.vyaw, req.forward_s, req.turn_s
+                )
+                return JSONResponse(result)
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=str(exc))
+        fn = getattr(stream, "patrol_stop", None)
+        if not callable(fn):
+            raise HTTPException(status_code=400, detail="当前模式不支持运动控制")
+        try:
+            result = await asyncio.to_thread(fn)
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    @app.get("/api/patrol_route")
+    async def patrol_route_get() -> JSONResponse:
+        fn = getattr(stream, "patrol_route_get", None)
+        if not callable(fn):
+            return JSONResponse({"steps": [], "loop": True})
+        return JSONResponse(fn())
+
+    @app.post("/api/patrol_route")
+    async def patrol_route_save(req: PatrolRouteRequest) -> JSONResponse:
+        fn = getattr(stream, "patrol_route_save", None)
+        if not callable(fn):
+            raise HTTPException(status_code=400, detail="当前模式不支持巡逻路线")
+        try:
+            result = await asyncio.to_thread(fn, req.steps, req.loop)
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
     @app.post("/api/sequence")
     async def do_sequence(req: SequenceRequest) -> JSONResponse:
@@ -228,6 +336,46 @@ def create_app(stream: VideoSource) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
+    # ─── 人脸触发（检测到任意人脸即播报 + 动作）──────────────────
+
+    @app.get("/api/face_trigger")
+    async def face_trigger_get() -> JSONResponse:
+        fn = getattr(stream, "face_trigger_get", None)
+        if not callable(fn):
+            return JSONResponse({"enabled": False, "say": "", "steps": [], "cooldown": 10.0})
+        return JSONResponse(fn())
+
+    @app.post("/api/face_trigger")
+    async def face_trigger_save(req: FaceTriggerRequest) -> JSONResponse:
+        fn = getattr(stream, "face_trigger_save", None)
+        if not callable(fn):
+            raise HTTPException(status_code=400, detail="当前模式不支持人脸触发（启动服务时需加 --face）")
+        try:
+            payload = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+            result = await asyncio.to_thread(fn, payload)
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.get("/api/face_stop")
+    async def face_stop_get() -> JSONResponse:
+        fn = getattr(stream, "face_stop_get", None)
+        if not callable(fn):
+            return JSONResponse({"enabled": False, "seconds": 3.0})
+        return JSONResponse(fn())
+
+    @app.post("/api/face_stop")
+    async def face_stop_save(req: FaceStopRequest) -> JSONResponse:
+        fn = getattr(stream, "face_stop_save", None)
+        if not callable(fn):
+            raise HTTPException(status_code=400, detail="当前模式不支持人脸暂停移动")
+        try:
+            payload = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+            result = await asyncio.to_thread(fn, payload)
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     @app.get("/api/face_image/{name}")
     async def face_image(name: str):
         fn = getattr(stream, "face_image_path", None)
@@ -288,6 +436,31 @@ def create_app(stream: VideoSource) -> FastAPI:
             media_type="multipart/x-mixed-replace; boundary=frame",
             headers={"Cache-Control": "no-store"},
         )
+
+    # ─── 语音对话 ───────────────────────────────────────────────
+
+    @app.get("/api/chat")
+    async def chat_status() -> JSONResponse:
+        if chat is None:
+            return JSONResponse({"enabled": False, "error": "未启用语音对话（config.json → chat.enabled）"})
+        return JSONResponse(chat.status())
+
+    @app.post("/api/chat/toggle")
+    async def chat_toggle(req: ChatToggleRequest) -> JSONResponse:
+        if chat is None:
+            raise HTTPException(status_code=400, detail="未启用语音对话")
+        chat.set_enabled(req.enabled)
+        return JSONResponse(chat.status())
+
+    @app.post("/api/chat/ask")
+    async def chat_ask(req: ChatAskRequest) -> JSONResponse:
+        if chat is None:
+            raise HTTPException(status_code=400, detail="未启用语音对话")
+        try:
+            result = await asyncio.to_thread(chat.ask_and_reply, req.text)
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
 
     @app.websocket("/ws/audio")
     async def audio_stream(ws: WebSocket):

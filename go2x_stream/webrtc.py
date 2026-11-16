@@ -32,6 +32,13 @@ from .tts import prepare_wav, prewarm
 
 logger = logging.getLogger(__name__)
 
+# 人脸判定：强匹配直接认定；弱匹配需要在时间窗内命中两次（应对走动时的模糊/侧脸）
+_FACE_STRONG_SIM = 0.40
+_FACE_WEAK_SIM = 0.33
+_FACE_VOTE_WINDOW = 2.0
+# 检测到人脸但未认出时，先等这么久（给识别留时间），再触发通用播报/动作
+_UNKNOWN_GRACE = 1.0
+
 # 自动模式下的候选地址：机器狗 AP 热点、有线直连的内置电脑
 _AUTO_CANDIDATES = ("192.168.12.1", "192.168.123.161")
 
@@ -66,6 +73,9 @@ class Go2WebRtcStream:
         face_interval: float = 1.0,
         motion=None,
         custom_actions=None,
+        face_trigger=None,
+        face_stop_store=None,
+        patrol_store=None,
     ) -> None:
         self._auto = ip is None and serial_number is None
         if self._auto:
@@ -114,12 +124,26 @@ class Go2WebRtcStream:
         self._audio_rate = 48000
         self._audio_clients = 0
         self._audio_logged = False
+        self._audio_sink_lock = threading.Lock()
+        self._audio_sinks: list = []
+        self._audio_channel_on = False
 
         # 运动控制（可选，WebRTC sport 通道）
         self._motion = motion
 
         # 自定义动作（可选，绑定到人脸后自动执行）
         self._custom_actions = custom_actions
+
+        # 人脸触发（检测到任意人脸即播报 + 动作，无需识别身份）
+        self._face_trigger = face_trigger
+        # 检测到人脸时暂停移动的配置
+        self._face_stop_store = face_stop_store
+        # 巡逻路线
+        self._patrol_store = patrol_store
+        self._face_retry_left = 2  # 未认出时还能补检几次（换人/认出后重置）
+        self._face_hits: dict[str, list[float]] = {}  # 姓名 -> 最近命中时间（弱匹配投票用）
+        self._unknown_since = 0.0  # 检测到「未认出的人脸」的起始时间
+        self._ft_last_trigger = 0.0
 
         if self._auto:
             self._apply_auto_target()
@@ -160,6 +184,10 @@ class Go2WebRtcStream:
                         texts.append(say)
             if self._face_recognizer is not None:
                 texts.extend(f"识别到{n}" for n in self._face_recognizer.registered_names())
+            if self._face_trigger is not None:
+                ft_say = (self._face_trigger.get().get("say") or "").strip()
+                if ft_say:
+                    texts.append(ft_say)
             if not texts:
                 return
             done = 0
@@ -238,15 +266,26 @@ class Go2WebRtcStream:
 
     def sport_action(self, api_id: int, parameter: Optional[dict] = None, timeout: float = 8.0) -> Optional[dict]:
         """经 WebRTC 数据通道下发一条 sport 指令（线程安全，阻塞到收到应答）。"""
+        return self.raw_request(RTC_TOPIC["SPORT_MOD"], api_id, parameter, timeout)
+
+    def raw_request(
+        self,
+        topic: str,
+        api_id: int,
+        parameter: Optional[dict] = None,
+        timeout: float = 8.0,
+        priority: bool = False,
+    ) -> Optional[dict]:
+        """向任意 rt/api/*/request 主题下发一条请求（调试用）。"""
         loop, conn = self._loop, self._conn
         if conn is None or loop is None or loop.is_closed():
             return None
         payload = {"api_id": api_id, "parameter": parameter or {}}
+        if priority:
+            payload["priority"] = 1
         try:
             future = asyncio.run_coroutine_threadsafe(
-                conn.datachannel.pub_sub.publish_request_new(
-                    RTC_TOPIC["SPORT_MOD"], payload,
-                ),
+                conn.datachannel.pub_sub.publish_request_new(topic, payload),
                 loop,
             )
             return future.result(timeout=timeout)
@@ -312,6 +351,41 @@ class Go2WebRtcStream:
         if self._motion is None:
             raise RuntimeError("未启用运动控制")
         return self._motion.do_sequence(steps)
+
+    def patrol_start(self, vx: float = 0.5, vyaw: float = 0.6,
+                     forward_s: float = 4.0, turn_s: float = 2.0) -> dict:
+        """开始巡逻（前进 + 转向循环）；检测到人脸会自动暂停。"""
+        if self._motion is None:
+            raise RuntimeError("未启用运动控制")
+        return self._motion.start_patrol(vx, vyaw, forward_s, turn_s)
+
+    def patrol_stop(self) -> dict:
+        """停止巡逻。"""
+        if self._motion is None:
+            raise RuntimeError("未启用运动控制")
+        return self._motion.stop_patrol()
+
+    # ─── 巡逻路线 ───────────────────────────────────────────────
+
+    def patrol_route_get(self) -> dict:
+        if self._patrol_store is None:
+            return {"steps": [], "loop": True}
+        return self._patrol_store.get()
+
+    def patrol_route_save(self, steps: list, loop: bool = True) -> dict:
+        if self._patrol_store is None:
+            raise RuntimeError("巡逻路线未启用")
+        return self._patrol_store.save(steps, loop)
+
+    def patrol_route_start(self) -> dict:
+        """按已保存的路线开始巡逻。"""
+        if self._motion is None:
+            raise RuntimeError("未启用运动控制")
+        cfg = self.patrol_route_get()
+        steps = cfg.get("steps") or []
+        if not steps:
+            raise RuntimeError("巡逻路线为空，请先编排并保存")
+        return self._motion.start_route(steps, bool(cfg.get("loop", True)))
 
     def list_actions(self) -> dict:
         """返回所有可用动作定义（给前端组合编辑器）。"""
@@ -422,10 +496,36 @@ class Go2WebRtcStream:
                         np.frombuffer(frame.jpeg, dtype=np.uint8), cv2.IMREAD_COLOR
                     )
                     if img is not None:
-                        results = self._face_recognizer.detect_and_identify(img)
+                        candidates, face_count = self._face_recognizer.match_faces(img)
+                        results = self._accept_faces(candidates)
+                        if face_count <= 0 or results:
+                            self._face_retry_left = 2
+                        # 有脸但仍未判定：换后面的帧补检（每次出现最多补 2 次）
+                        retries = 0
+                        while face_count > 0 and not results and self._face_retry_left > 0:
+                            retries += 1
+                            self._face_retry_left -= 1
+                            if self._face_stop.wait(0.15):
+                                break
+                            nxt = self.latest_frame()
+                            if nxt is None:
+                                break
+                            nimg = cv2.imdecode(
+                                np.frombuffer(nxt.jpeg, dtype=np.uint8),
+                                cv2.IMREAD_COLOR,
+                            )
+                            if nimg is None:
+                                break
+                            candidates, face_count = self._face_recognizer.match_faces(nimg)
+                            results = self._accept_faces(candidates)
+                            if results:
+                                self._face_retry_left = 2
+                        if results and retries:
+                            logger.info("人脸补检 %d 次后识别成功", retries)
                         with self._face_lock:
                             self._face_results = results
                             self._face_seq = frame.seq
+                        self._handle_face_presence(face_count, len(results))
                         if results:
                             name, sim, _ = max(results, key=lambda r: r[1])
                             now = time.monotonic()
@@ -435,6 +535,31 @@ class Go2WebRtcStream:
                 except Exception as exc:
                     logger.warning("人脸识别失败: %s", exc)
             self._face_stop.wait(self._face_interval)
+
+    def _accept_faces(
+        self, candidates: list[tuple[Optional[str], float, list[int]]]
+    ) -> list[tuple[str, float, list[int]]]:
+        """把每张脸的最佳匹配转成判定结果。
+
+        相似度 >= 0.40 直接认定；0.33~0.40 之间需要在 2 秒内再命中一次，避免走动模糊时漏检。
+        """
+        now = time.monotonic()
+        accepted: list[tuple[str, float, list[int]]] = []
+        for name, sim, bbox in candidates:
+            if not name or sim < _FACE_WEAK_SIM:
+                continue
+            hits = [t for t in self._face_hits.get(name, []) if now - t <= _FACE_VOTE_WINDOW]
+            hits.append(now)
+            self._face_hits[name] = hits
+            if sim >= _FACE_STRONG_SIM or len(hits) >= 2:
+                accepted.append((name, round(sim, 2), bbox))
+        for name in list(self._face_hits):
+            recent = [t for t in self._face_hits[name] if now - t <= _FACE_VOTE_WINDOW]
+            if recent:
+                self._face_hits[name] = recent
+            else:
+                self._face_hits.pop(name, None)
+        return accepted
 
     def _announce(self, name: str, sim: float) -> None:
         """识别到人后播报并按绑定的自定义动作执行动作序列。"""
@@ -451,6 +576,114 @@ class Go2WebRtcStream:
                 self._motion.do_sequence(custom.get("steps") or [])
             except Exception as exc:
                 logger.warning("执行自定义动作 %s 失败: %s", custom.get("name"), exc)
+
+    def _handle_face_presence(self, face_count: int, recognized: int = 0) -> None:
+        """有人脸就暂停移动；只有「没认出是谁」时才触发通用播报/动作。
+
+        认出是谁时改由 _announce 播个性化内容；未认出时先等 _UNKNOWN_GRACE 秒，
+        避免识别慢半拍时又重复播通用内容。
+        """
+        if face_count <= 0:
+            self._unknown_since = 0.0
+            return
+        self._hold_on_face()
+        if recognized:
+            self._unknown_since = 0.0
+            return
+        now = time.monotonic()
+        if self._unknown_since <= 0.0:
+            self._unknown_since = now
+            return
+        if now - self._unknown_since >= _UNKNOWN_GRACE:
+            self._unknown_since = 0.0
+            self._trigger_face_action()
+
+    def _hold_on_face(self) -> None:
+        """检测到人脸时暂停移动一段时间（配置可关闭）。"""
+        if self._face_stop_store is None or self._motion is None:
+            return
+        cfg = self._face_stop_store.get()
+        if not cfg.get("enabled"):
+            return
+        try:
+            self._motion.hold(float(cfg.get("seconds", 3.0)))
+        except Exception as exc:
+            logger.warning("暂停移动失败: %s", exc)
+
+    def _trigger_face_action(self) -> None:
+        """按「人脸触发」配置播报并执行动作（不需要识别身份）。"""
+        if self._face_trigger is None:
+            return
+        cfg = self._face_trigger.get()
+        if not cfg.get("enabled"):
+            return
+        now = time.monotonic()
+        cooldown = float(cfg.get("cooldown", 10.0))
+        if now - self._ft_last_trigger < cooldown:
+            return
+        self._ft_last_trigger = now
+
+        say_text = (cfg.get("say") or "").strip()
+        steps = cfg.get("steps") or []
+        logger.info(
+            "检测到未识别的人脸，触发通用动作（播报: %s，%d 步）",
+            say_text or "无", len(steps),
+        )
+
+        def _say() -> None:
+            try:
+                self.say(say_text)
+            except Exception as exc:
+                logger.warning("人脸触发播报失败: %s", exc)
+
+        def _run() -> None:
+            motion = self._motion
+            if motion is not None:
+                try:
+                    # 先站立，站起来之后再播报/做动作
+                    motion.do_sequence(
+                        [{"action": "standup", "duration": 2.5}], wait=True
+                    )
+                except Exception as exc:
+                    logger.warning("人脸触发起立失败: %s", exc)
+            if say_text:
+                # 播报与动作并行：音频走 audiohub，动作走 sport 通道，互不阻塞
+                threading.Thread(
+                    target=_say, name="go2-face-say", daemon=True
+                ).start()
+            if steps and motion is not None:
+                try:
+                    motion.do_sequence(steps)
+                except Exception as exc:
+                    logger.warning("人脸触发动作失败: %s", exc)
+
+        threading.Thread(target=_run, name="go2-face-trigger", daemon=True).start()
+
+    # ─── 人脸触发 / 暂停移动配置 ─────────────────────────────────
+
+    def face_trigger_get(self) -> dict:
+        if self._face_trigger is None:
+            return {"enabled": False, "say": "", "steps": [], "cooldown": 10.0}
+        return self._face_trigger.get()
+
+    def face_trigger_save(self, payload: dict) -> dict:
+        if self._face_trigger is None:
+            raise RuntimeError("人脸触发未启用（启动服务时需加 --face）")
+        result = self._face_trigger.save(payload)
+        say = (result.get("say") or "").strip()
+        if say:
+            result["tts_ready"] = prewarm(say)
+        return result
+
+    def face_stop_get(self) -> dict:
+        if self._face_stop_store is None:
+            return {"enabled": False, "seconds": 3.0}
+        return self._face_stop_store.get()
+
+    def face_stop_save(self, payload: dict) -> dict:
+        if self._face_stop_store is None:
+            raise RuntimeError("人脸暂停移动未启用（启动服务时需加 --face）")
+        return self._face_stop_store.save(payload)
 
     async def _say_async(self, text: str) -> dict:
         conn = self._conn
@@ -662,7 +895,9 @@ class Go2WebRtcStream:
                 conn.video.add_track_callback(self._receive_video)
                 conn.video.switchVideoChannel(True)
                 conn.audio.add_track_callback(self._receive_audio)
-                conn.audio.switchAudioChannel(True)
+                # 只有确实需要音频（网页播放/语音对话）时才让机器狗推音频
+                self._audio_channel_on = False
+                self._sync_audio_channel()
 
                 while not self._stop.is_set():
                     if not conn.isConnected:
@@ -686,6 +921,7 @@ class Go2WebRtcStream:
                     except Exception:
                         pass
                 self._conn = None
+                self._audio_channel_on = False
                 with self._lock:
                     self._connected = False
 
@@ -727,10 +963,13 @@ class Go2WebRtcStream:
             self._frame_times.append(time.monotonic())
 
     async def _receive_audio(self, frame) -> None:
-        """把机器狗麦克风音频帧转成 16bit 单声道 PCM，缓存供网页拉取。"""
+        """把机器狗麦克风音频帧转成 16bit 单声道 PCM，转给播放/对话模块。"""
         with self._audio_lock:
-            if self._audio_clients <= 0:
-                return
+            want_stream = self._audio_clients > 0
+        with self._audio_sink_lock:
+            sinks = list(self._audio_sinks)
+        if not want_stream and not sinks:
+            return
         try:
             import numpy as np
 
@@ -755,14 +994,22 @@ class Go2WebRtcStream:
                     pcm = flat.reshape(-1, channels).mean(axis=1).astype(np.int16)
                 else:
                     pcm = flat
-            data = pcm.tobytes()
         except Exception as exc:
             logger.debug("音频帧转换失败: %s", exc)
             return
+
+        rate = int(getattr(frame, "sample_rate", 0) or self._audio_rate)
         with self._audio_lock:
-            self._audio_rate = int(getattr(frame, "sample_rate", 0) or self._audio_rate)
-            self._audio_chunks.append(data)
-            self._audio_seq += 1
+            self._audio_rate = rate
+            if want_stream:
+                self._audio_chunks.append(pcm.tobytes())
+                self._audio_seq += 1
+
+        for callback in sinks:
+            try:
+                callback(pcm, rate)
+            except Exception as exc:
+                logger.debug("音频回调失败: %s", exc)
 
     # ─── 音频对外接口（供 WebSocket 使用）────────────────────────
 
@@ -771,10 +1018,52 @@ class Go2WebRtcStream:
         with self._audio_lock:
             self._audio_chunks.clear()
             self._audio_clients += 1
+        self._sync_audio_channel()
+
+    def add_audio_sink(self, callback) -> None:
+        """注册常驻音频消费者（如语音对话），与网页播放互不影响。"""
+        with self._audio_sink_lock:
+            if callback not in self._audio_sinks:
+                self._audio_sinks.append(callback)
+        self._sync_audio_channel()
+
+    def remove_audio_sink(self, callback) -> None:
+        with self._audio_sink_lock:
+            if callback in self._audio_sinks:
+                self._audio_sinks.remove(callback)
+        self._sync_audio_channel()
+
+    def _sync_audio_channel(self) -> None:
+        """按需开关机器狗音频通道：无人播放且未启用对话时关闭，省 CPU。"""
+        conn, loop = self._conn, self._loop
+        if conn is None or loop is None or loop.is_closed():
+            return
+        with self._audio_lock:
+            want = self._audio_clients > 0
+        with self._audio_sink_lock:
+            want = want or bool(self._audio_sinks)
+        if want == self._audio_channel_on:
+            return
+        try:
+            loop.call_soon_threadsafe(self._switch_audio_channel, want)
+        except RuntimeError:
+            pass
+
+    def _switch_audio_channel(self, on: bool) -> None:
+        conn = self._conn
+        if conn is None:
+            return
+        try:
+            conn.audio.switchAudioChannel(on)
+            self._audio_channel_on = on
+            logger.info("机器狗音频通道已%s", "开启" if on else "关闭")
+        except Exception as exc:
+            logger.debug("切换音频通道失败: %s", exc)
 
     def audio_end(self) -> None:
         with self._audio_lock:
             self._audio_clients = max(0, self._audio_clients - 1)
+        self._sync_audio_channel()
 
     def audio_seq(self) -> int:
         with self._audio_lock:

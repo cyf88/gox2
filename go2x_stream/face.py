@@ -145,8 +145,43 @@ class FaceRecognizer:
 
         输入会先缩到 max_detect_width 宽再推理，显著降低 CPU 开销。
         """
-        if not self._registry:
-            return []
+        return self.detect_all(frame)[0]
+
+    def detect_all(self, frame: np.ndarray) -> tuple[list[tuple[str, float, list[int]]], int]:
+        """一次推理同时返回「已识别的人」和「检测到的人脸总数」。
+
+        即使没有人脸库也会执行检测，便于实现「检测到人脸即触发」的功能。
+        """
+        faces, scale = self._infer(frame)
+        results: list[tuple[str, float, list[int]]] = []
+        for face in faces:
+            if not self._registry:
+                break
+            name, sim = self._match(face.normed_embedding)
+            if name is None:
+                continue
+            bbox = [int(v / scale) for v in face.bbox]
+            results.append((name, round(sim, 2), bbox))
+        return results, len(faces)
+
+    def match_faces(
+        self, frame: np.ndarray
+    ) -> tuple[list[tuple[Optional[str], float, list[int]]], int]:
+        """返回每张脸「最相似的人（不做阈值过滤）」和相似度，供上层做时间窗投票。
+
+        结果形如 [(姓名或 None, 相似度, bbox)]；姓名为 None 表示人脸库里没有人脸。
+        """
+        faces, scale = self._infer(frame)
+        out: list[tuple[Optional[str], float, list[int]]] = []
+        for face in faces:
+            if not self._registry:
+                break
+            name, sim = self._best_match(face.normed_embedding)
+            out.append((name, sim, [int(v / scale) for v in face.bbox]))
+        return out, len(faces)
+
+    def _infer(self, frame: np.ndarray):
+        """按最大宽度缩放后跑一次检测，返回 (faces, 缩放比例)。"""
         h, w = frame.shape[:2]
         scale = 1.0
         img = frame
@@ -156,15 +191,7 @@ class FaceRecognizer:
                 frame, (self._max_detect_width, int(h * scale)),
                 interpolation=cv2.INTER_AREA,
             )
-        faces = self._app.get(img)
-        results: list[tuple[str, float, list[int]]] = []
-        for face in faces:
-            name, sim = self._match(face.normed_embedding)
-            if name is None:
-                continue
-            bbox = [int(v / scale) for v in face.bbox]
-            results.append((name, round(sim, 2), bbox))
-        return results
+        return self._app.get(img), scale
 
     def recognize(self, frame: np.ndarray) -> list[tuple[str, float]]:
         """识别画面中的所有已知人脸，返回 [(姓名, 相似度)]。"""
@@ -224,15 +251,20 @@ class FaceRecognizer:
 
     def _match(self, emb: np.ndarray) -> tuple[Optional[str], float]:
         """与注册人脸比对，返回最匹配的 (姓名, 相似度) 或 (None, 相似度)。"""
+        best_name, best_sim = self._best_match(emb)
+        if best_name is not None and best_sim >= self._threshold:
+            return best_name, best_sim
+        return None, best_sim
+
+    def _best_match(self, emb: np.ndarray) -> tuple[Optional[str], float]:
+        """返回最相似的 (姓名, 相似度)，不做过阈值过滤。"""
         best_name: Optional[str] = None
         best_sim = -1.0
         for name, ref in self._registry.items():
             sim = float(np.dot(emb, ref))  # 已归一化，点积即余弦相似度
             if sim > best_sim:
                 best_name, best_sim = name, sim
-        if best_name is not None and best_sim >= self._threshold:
-            return best_name, best_sim
-        return None, best_sim
+        return best_name, best_sim
 
 
 def draw_boxes(frame: np.ndarray, results: list) -> np.ndarray:
