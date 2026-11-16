@@ -65,6 +65,7 @@ class Go2WebRtcStream:
         say_cooldown: float = 30.0,
         face_interval: float = 1.0,
         motion=None,
+        custom_actions=None,
     ) -> None:
         self._auto = ip is None and serial_number is None
         if self._auto:
@@ -104,6 +105,9 @@ class Go2WebRtcStream:
 
         # 运动控制（可选，WebRTC sport 通道）
         self._motion = motion
+
+        # 自定义动作（可选，绑定到人脸后自动执行）
+        self._custom_actions = custom_actions
 
         if self._auto:
             self._apply_auto_target()
@@ -191,16 +195,16 @@ class Go2WebRtcStream:
         conn = self._conn
         return bool(conn is not None and conn.isConnected)
 
-    def sport_action(self, api_id: int, timeout: float = 8.0) -> Optional[dict]:
+    def sport_action(self, api_id: int, parameter: Optional[dict] = None, timeout: float = 8.0) -> Optional[dict]:
         """经 WebRTC 数据通道下发一条 sport 指令（线程安全，阻塞到收到应答）。"""
         loop, conn = self._loop, self._conn
         if conn is None or loop is None or loop.is_closed():
             return None
+        payload = {"api_id": api_id, "parameter": parameter or {}}
         try:
             future = asyncio.run_coroutine_threadsafe(
                 conn.datachannel.pub_sub.publish_request_new(
-                    RTC_TOPIC["SPORT_MOD"],
-                    {"api_id": api_id, "parameter": {}},
+                    RTC_TOPIC["SPORT_MOD"], payload,
                 ),
                 loop,
             )
@@ -220,7 +224,7 @@ class Go2WebRtcStream:
         future = asyncio.run_coroutine_threadsafe(self._say_async(text), loop)
         return future.result(timeout=90)
 
-    def register_face(self, name: str, image_bytes: bytes, category: str = "") -> dict:
+    def register_face(self, name: str, image_bytes: bytes) -> dict:
         """从上传的图片字节注册人脸（需已启用人脸识别）。"""
         if self._face_recognizer is None:
             raise RuntimeError("未启用人脸识别（启动服务时需加 --face）")
@@ -229,23 +233,48 @@ class Go2WebRtcStream:
         img = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             raise RuntimeError("无法解码图片，请上传 JPG/PNG 格式")
-        self._face_recognizer.register_image(name, img, category)
-        return {"ok": True, "name": name, "category": category}
+        self._face_recognizer.register_image(name, img)
+        return {"ok": True, "name": name}
 
     def registered_faces(self) -> list[dict]:
-        """返回已注册的人脸列表（含姓名与分类）。"""
+        """返回已注册的人脸列表（含姓名与绑定的自定义动作名）。"""
         if self._face_recognizer is None:
             return []
-        return [
-            {"name": n, "category": self._face_recognizer.category_of(n)}
-            for n in self._face_recognizer.registered_names()
-        ]
+        faces = []
+        for n in self._face_recognizer.registered_names():
+            action = self._custom_actions.assignment_of(n) if self._custom_actions else ""
+            faces.append({"name": n, "action": action})
+        return faces
 
     def do_action(self, action: str) -> dict:
         """触发机器狗动作（需已启用运动控制）。"""
         if self._motion is None:
             raise RuntimeError("未启用运动控制")
         return self._motion.do_action(action)
+
+    def move(self, vx: float, vy: float = 0.0, vyaw: float = 0.0) -> dict:
+        """设置持续速度指令（前进/后退/侧移/旋转）。"""
+        if self._motion is None:
+            raise RuntimeError("未启用运动控制")
+        return self._motion.move(vx, vy, vyaw)
+
+    def stop_move(self) -> dict:
+        """停止移动（仅速度控制）。"""
+        if self._motion is None:
+            raise RuntimeError("未启用运动控制")
+        return self._motion.stop_move()
+
+    def do_sequence(self, steps: list) -> dict:
+        """串行执行一组动作/移动/延时。"""
+        if self._motion is None:
+            raise RuntimeError("未启用运动控制")
+        return self._motion.do_sequence(steps)
+
+    def list_actions(self) -> dict:
+        """返回所有可用动作定义（给前端组合编辑器）。"""
+        if self._motion is None:
+            return {"actions": [], "velocity_range": {}}
+        return self._motion.list_actions()
 
     def motion_status(self) -> dict:
         """返回运动控制状态。"""
@@ -260,12 +289,44 @@ class Go2WebRtcStream:
         return self._face_recognizer.face_image_path(name)
 
     def delete_face(self, name: str) -> dict:
-        """删除一个已注册的人脸。"""
+        """删除一个已注册的人脸，并清理其自定义动作绑定。"""
         if self._face_recognizer is None:
             raise RuntimeError("未启用人脸识别（启动服务时需加 --face）")
         if not self._face_recognizer.delete(name):
             raise RuntimeError(f"未找到已注册人脸: {name}")
+        if self._custom_actions is not None:
+            self._custom_actions.remove_face(name)
         return {"ok": True, "name": name}
+
+    # ─── 自定义动作 ─────────────────────────────────────────────
+
+    def custom_actions_list(self) -> list[dict]:
+        """返回所有自定义动作。"""
+        if self._custom_actions is None:
+            return []
+        return self._custom_actions.list_actions()
+
+    def save_custom_action(self, name: str, say: str, steps: list) -> dict:
+        """新建或覆盖一个自定义动作（动作序列 + 播报文本）。"""
+        if self._custom_actions is None:
+            raise RuntimeError("未启用自定义动作存储")
+        return self._custom_actions.save(name, say, steps)
+
+    def delete_custom_action(self, name: str) -> dict:
+        """删除一个自定义动作。"""
+        if self._custom_actions is None:
+            raise RuntimeError("未启用自定义动作存储")
+        if not self._custom_actions.delete(name):
+            raise RuntimeError(f"未找到自定义动作: {name}")
+        return {"ok": True, "name": name}
+
+    def assign_face_action(self, face_name: str, action_name: str) -> dict:
+        """把已注册人脸绑定到某个自定义动作（传空字符串解除绑定）。"""
+        if self._custom_actions is None:
+            raise RuntimeError("未启用自定义动作存储")
+        if self._face_recognizer is not None and face_name not in self._face_recognizer.registered_names():
+            raise RuntimeError(f"未找到已注册人脸: {face_name}")
+        return self._custom_actions.assign(face_name, action_name or "")
 
     def detect_video(self, video_bytes: bytes, filename: str = "video.mp4") -> dict:
         """对上传的离线视频做人脸检测识别，返回识别结果汇总。"""
@@ -318,22 +379,20 @@ class Go2WebRtcStream:
             self._face_stop.wait(self._face_interval)
 
     def _announce(self, name: str, sim: float) -> None:
-        """识别到人后触发机器狗播报，并按该人的分类触发对应动作。"""
-        text = f"识别到{name}"
+        """识别到人后播报并按绑定的自定义动作执行动作序列。"""
+        custom = self._custom_actions.action_of(name) if self._custom_actions else None
+        text = (custom or {}).get("say") or f"识别到{name}"
         logger.info("识别到 %s（相似度 %.2f），播报: %s", name, sim, text)
         try:
             self.say(text)
         except Exception as exc:
             logger.warning("播报失败: %s", exc)
 
-        # 按人脸分类触发动作（分类为空则不动作）
-        if self._motion is not None and self._face_recognizer is not None:
-            category = self._face_recognizer.category_of(name)
-            if category:
-                try:
-                    self._motion.do_action(category)
-                except Exception as exc:
-                    logger.warning("触发动作 %s 失败: %s", category, exc)
+        if custom and self._motion is not None:
+            try:
+                self._motion.do_sequence(custom.get("steps") or [])
+            except Exception as exc:
+                logger.warning("执行自定义动作 %s 失败: %s", custom.get("name"), exc)
 
     async def _say_async(self, text: str) -> dict:
         conn = self._conn

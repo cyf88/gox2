@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Optional
@@ -20,10 +19,6 @@ _MODEL_NAME = "buffalo_l"
 
 # ArcFace 余弦相似度阈值：相似度 >= 该值判定为同一人
 _DEFAULT_THRESHOLD = 0.4
-
-# 人脸动作分类（识别到该人时触发的动作 key，与 motion.ACTION_MAP 对应）
-# 空字符串表示不触发动作，仅播报
-CATEGORIES_FILE = "categories.json"
 
 
 class FaceRecognizer:
@@ -45,9 +40,7 @@ class FaceRecognizer:
         self._faces_dir.mkdir(parents=True, exist_ok=True)
         self._threshold = threshold
         self._registry: dict[str, np.ndarray] = {}
-        self._categories: dict[str, str] = {}
         self._load_registry()
-        self._load_categories()
 
     # ─── 人脸库管理 ─────────────────────────────────────────────
 
@@ -61,30 +54,6 @@ class FaceRecognizer:
                 logger.warning("加载人脸特征失败 %s: %s", path, exc)
         logger.info("已加载 %d 个注册人脸: %s", len(self._registry), list(self._registry))
 
-    def _load_categories(self) -> None:
-        """从 categories.json 加载人脸 → 动作分类映射。"""
-        self._categories.clear()
-        p = self._faces_dir / CATEGORIES_FILE
-        if not p.exists():
-            return
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                self._categories = {k: str(v) for k, v in data.items()}
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("加载人脸分类失败 %s: %s", p, exc)
-
-    def _save_categories(self) -> None:
-        """把分类映射写回 categories.json。"""
-        p = self._faces_dir / CATEGORIES_FILE
-        try:
-            p.write_text(
-                json.dumps(self._categories, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            logger.warning("保存人脸分类失败 %s: %s", p, exc)
-
     def register(self, image_path: str, name: str) -> None:
         """从图片文件路径提取人脸特征并注册。"""
         img = cv2.imread(image_path)
@@ -92,12 +61,8 @@ class FaceRecognizer:
             raise ValueError(f"无法读取图片: {image_path}")
         self.register_image(name, img)
 
-    def register_image(self, name: str, img: np.ndarray, category: str = "") -> None:
-        """从图像数据（BGR ndarray）提取人脸特征并注册。
-
-        category 为该人识别到时的动作分类（对应 motion.ACTION_MAP 的 key），
-        空字符串表示不触发动作，仅播报。
-        """
+    def register_image(self, name: str, img: np.ndarray) -> None:
+        """从图像数据（BGR ndarray）提取人脸特征并注册。"""
         faces = self._app.get(img)
         if not faces:
             raise ValueError("未在图片中检测到人脸，请换一张正脸清晰的照片")
@@ -105,12 +70,7 @@ class FaceRecognizer:
         np.save(self._faces_dir / f"{name}.npy", face.normed_embedding)
         self._save_thumbnail(name, img, face)
         self._registry[name] = face.normed_embedding
-        if category:
-            self._categories[name] = category
-        else:
-            self._categories.pop(name, None)
-        self._save_categories()
-        logger.info("已注册人脸: %s（分类: %s）", name, category or "无")
+        logger.info("已注册人脸: %s", name)
 
     def _save_thumbnail(self, name: str, img: np.ndarray, face) -> None:
         """裁剪人脸区域并保存为缩略图，供列表展示。"""
@@ -146,12 +106,8 @@ class FaceRecognizer:
     def registered_names(self) -> list[str]:
         return list(self._registry)
 
-    def category_of(self, name: str) -> str:
-        """返回某人的动作分类（不存在返回空字符串）。"""
-        return self._categories.get(name, "")
-
     def delete(self, name: str) -> bool:
-        """删除一个已注册的人脸（特征 + 缩略图 + 分类）。"""
+        """删除一个已注册的人脸（特征 + 缩略图）。"""
         if name not in self._registry:
             return False
         for ext in (".npy", ".jpg"):
@@ -162,9 +118,6 @@ class FaceRecognizer:
             except OSError as exc:
                 logger.warning("删除人脸文件失败 %s: %s", p, exc)
         self._registry.pop(name, None)
-        if name in self._categories:
-            self._categories.pop(name, None)
-            self._save_categories()
         logger.info("已删除注册人脸: %s", name)
         return True
 

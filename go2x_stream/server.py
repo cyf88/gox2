@@ -42,6 +42,16 @@ class ActionRequest(BaseModel):
     action: str
 
 
+class CustomActionRequest(BaseModel):
+    name: str
+    say: str = ""
+    steps: list
+
+
+class AssignActionRequest(BaseModel):
+    action: str = ""
+
+
 def create_app(stream: VideoSource) -> FastAPI:
     app = FastAPI(title="Go2X 视频流")
 
@@ -100,18 +110,69 @@ def create_app(stream: VideoSource) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
+    @app.get("/api/actions")
+    async def list_actions() -> JSONResponse:
+        """返回所有可用动作列表（给前端组合编辑器）。"""
+        fn = getattr(stream, "list_actions", None)
+        if not callable(fn):
+            return JSONResponse({"actions": [], "velocity_range": {}})
+        return JSONResponse(fn())
+
+    class MoveRequest(BaseModel):
+        vx: float = 0.0
+        vy: float = 0.0
+        vyaw: float = 0.0
+
+    @app.post("/api/move")
+    async def move(req: MoveRequest) -> JSONResponse:
+        """设置持续速度指令。"""
+        fn = getattr(stream, "move", None)
+        if not callable(fn):
+            raise HTTPException(status_code=400, detail="当前模式不支持运动控制")
+        try:
+            result = await asyncio.to_thread(fn, req.vx, req.vy, req.vyaw)
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    @app.post("/api/stop_move")
+    async def stop_move() -> JSONResponse:
+        """立即停止移动。"""
+        fn = getattr(stream, "stop_move", None)
+        if not callable(fn):
+            raise HTTPException(status_code=400, detail="当前模式不支持运动控制")
+        try:
+            result = await asyncio.to_thread(fn)
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    class SequenceRequest(BaseModel):
+        steps: list
+
+    @app.post("/api/sequence")
+    async def do_sequence(req: SequenceRequest) -> JSONResponse:
+        """串行执行一串动作/移动/延时。"""
+        fn = getattr(stream, "do_sequence", None)
+        if not callable(fn):
+            raise HTTPException(status_code=400, detail="当前模式不支持运动控制")
+        try:
+            result = await asyncio.to_thread(fn, req.steps)
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
     @app.post("/api/register_face")
     async def register_face(
         name: str = Form(...),
         image: UploadFile = File(...),
-        category: str = Form(""),
     ):
         register_fn = getattr(stream, "register_face", None)
         if not callable(register_fn):
             raise HTTPException(status_code=400, detail="当前模式不支持人脸注册（启动服务时需加 --face）")
         data = await image.read()
         try:
-            result = await asyncio.to_thread(register_fn, name, data, category)
+            result = await asyncio.to_thread(register_fn, name, data)
             return JSONResponse(result)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
@@ -120,6 +181,46 @@ def create_app(stream: VideoSource) -> FastAPI:
     async def faces() -> JSONResponse:
         fn = getattr(stream, "registered_faces", None)
         return JSONResponse(fn() if callable(fn) else [])
+
+    # ─── 自定义动作 ─────────────────────────────────────────────
+
+    @app.get("/api/custom_actions")
+    async def custom_actions() -> JSONResponse:
+        fn = getattr(stream, "custom_actions_list", None)
+        return JSONResponse(fn() if callable(fn) else [])
+
+    @app.post("/api/custom_actions")
+    async def save_custom_action(req: CustomActionRequest) -> JSONResponse:
+        fn = getattr(stream, "save_custom_action", None)
+        if not callable(fn):
+            raise HTTPException(status_code=400, detail="当前模式不支持自定义动作")
+        try:
+            result = await asyncio.to_thread(fn, req.name, req.say, req.steps)
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.delete("/api/custom_actions/{name}")
+    async def delete_custom_action(name: str) -> JSONResponse:
+        fn = getattr(stream, "delete_custom_action", None)
+        if not callable(fn):
+            raise HTTPException(status_code=400, detail="当前模式不支持自定义动作")
+        try:
+            result = await asyncio.to_thread(fn, name)
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/face/{name}/action")
+    async def assign_face_action(name: str, req: AssignActionRequest) -> JSONResponse:
+        fn = getattr(stream, "assign_face_action", None)
+        if not callable(fn):
+            raise HTTPException(status_code=400, detail="当前模式不支持自定义动作")
+        try:
+            result = await asyncio.to_thread(fn, name, req.action)
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
     @app.get("/api/face_image/{name}")
     async def face_image(name: str):

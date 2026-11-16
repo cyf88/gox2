@@ -144,6 +144,7 @@ def run_window(stream) -> None:
 
 def create_stream(args: argparse.Namespace):
     face_recognizer = None
+    custom_actions = None
     if args.face:
         from go2x_stream.face import FaceRecognizer
 
@@ -151,6 +152,11 @@ def create_stream(args: argparse.Namespace):
             model_root=resource_dir(),
             faces_dir=app_dir() / "faces",
         )
+
+    if args.face or args.motion:
+        from go2x_stream.custom_actions import CustomActionStore
+
+        custom_actions = CustomActionStore(data_dir=app_dir() / "faces")
 
     motion = None
     if args.motion:
@@ -174,6 +180,7 @@ def create_stream(args: argparse.Namespace):
         say_cooldown=args.say_cooldown,
         face_interval=args.face_interval,
         motion=motion,
+        custom_actions=custom_actions,
     )
     if motion is not None:
         motion.attach(stream)

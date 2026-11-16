@@ -167,6 +167,8 @@
   .btn-green { background: var(--ok); color: #06210f; }
   .btn-blue { background: var(--accent); color: #fff; }
   .btn-red { background: var(--err); color: #fff; }
+  .btn-orange { background: #f59e0b; color: #1a1200; }
+  .btn-purple { background: #a855f7; color: #fff; }
   .btn:disabled { opacity: .55; cursor: not-allowed; }
 
   /* 人脸添加视图 */
@@ -245,10 +247,111 @@
     justify-content: center;
     flex-shrink: 0;
   }
+  .face-del, .face-edit {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: none;
+    background: #2a3140;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    padding: 0;
+  }
   .face-del:hover { background: var(--err); color: #fff; }
+  .face-edit:hover { background: var(--accent); color: #fff; }
+  .face-action-select {
+    padding: 4px 8px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: #0e1116;
+    color: var(--text);
+    font-size: 12px;
+    font-family: inherit;
+    outline: none;
+    max-width: 150px;
+  }
+  .face-action-select:focus { border-color: var(--ok); }
   .face-empty { font-size: 13px; color: var(--muted); }
   .detect-meta { font-size: 13px; color: var(--muted); margin-bottom: 12px; }
   .detect-time { font-size: 12px; color: var(--muted); }
+
+  /* 方向键面板 */
+  .drive-panel {
+    display: flex;
+    gap: 24px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .dpad {
+    display: grid;
+    grid-template-columns: repeat(3, 52px);
+    grid-template-rows: repeat(3, 52px);
+    gap: 4px;
+  }
+  .dpad .dbtn {
+    width: 52px; height: 52px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    font-size: 20px;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    user-select: none;
+    transition: background .1s, transform .05s;
+  }
+  .dpad .dbtn:hover { background: #1a2230; }
+  .dpad .dbtn:active, .dpad .dbtn.pressed { background: var(--accent); color: #fff; transform: scale(0.95); }
+  .dpad .dbtn.stop { background: #2a1a1a; border-color: var(--err); color: var(--err); font-size: 14px; }
+  .dpad .dbtn.stop:hover { background: var(--err); color: #fff; }
+  .dpad .empty { visibility: hidden; }
+  .drive-panel .col { display: flex; flex-direction: column; gap: 10px; }
+  .drive-panel .label { font-size: 12px; color: var(--muted); }
+  .speed-slider {
+    width: 140px;
+    accent-color: var(--accent);
+  }
+
+  /* 组合动作编辑器 */
+  .seq-editor {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+  }
+  .seq-editor h2 { margin: 0 0 12px; font-size: 16px; display: flex; align-items: center; gap: 8px; }
+  .seq-add-row {
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px;
+  }
+  .seq-add-row select, .seq-add-row input {
+    padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font-size: 13px; outline: none;
+  }
+  .seq-add-row input { width: 72px; }
+  .seq-add-row label { font-size: 12px; color: var(--muted); }
+  .seq-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; max-height: 260px; overflow-y: auto; }
+  .seq-item {
+    display: flex; gap: 8px; align-items: center;
+    padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border);
+    background: #0e1116; font-size: 13px;
+  }
+  .seq-item .idx { color: var(--muted); width: 22px; text-align: right; font-variant-numeric: tabular-nums; }
+  .seq-item .detail { flex: 1; color: var(--text); }
+  .seq-item .tag { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #1a2230; color: var(--accent); }
+  .seq-item .remove {
+    width: 22px; height: 22px; border: none; border-radius: 50%;
+    background: transparent; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1;
+  }
+  .seq-item .remove:hover { background: var(--err); color: #fff; }
+  .seq-toolbar { display: flex; gap: 8px; align-items: center; }
+  .seq-toolbar .spacer { flex: 1; }
 
   footer { font-size: 12px; color: #5f6775; }
 </style>
@@ -260,6 +363,12 @@
       <nav class="nav">
         <button class="nav-item active" data-view="live">
           <span class="ico">▣</span>实时画面
+        </button>
+        <button class="nav-item" data-view="drive">
+          <span class="ico">➤</span>方向控制
+        </button>
+        <button class="nav-item" data-view="sequence">
+          <span class="ico">⛓</span>组合动作
         </button>
         <button class="nav-item" data-view="face">
           <span class="ico">◉</span>人脸添加
@@ -297,18 +406,129 @@
         </div>
 
         <div class="actionbar">
-          <span class="actionbar-title">动作控制</span>
-          <button class="btn btn-blue action-btn" data-action="hello">挥手</button>
-          <button class="btn btn-blue action-btn" data-action="heart">比心</button>
-          <button class="btn btn-blue action-btn" data-action="dance1">跳舞1</button>
-          <button class="btn btn-blue action-btn" data-action="dance2">跳舞2</button>
-          <button class="btn btn-blue action-btn" data-action="sit">坐下</button>
-          <button class="btn btn-blue action-btn" data-action="standup">站立</button>
-          <button class="btn btn-blue action-btn" data-action="stretch">伸懒腰</button>
+          <span class="actionbar-title">日常</span>
+          <button class="btn btn-blue action-btn" data-action="hello">👋 挥手</button>
+          <button class="btn btn-blue action-btn" data-action="heart">💛 比心</button>
+          <button class="btn btn-blue action-btn" data-action="dance1">🎵 跳舞1</button>
+          <button class="btn btn-blue action-btn" data-action="dance2">🎶 跳舞2</button>
+        </div>
+        <div class="actionbar">
+          <span class="actionbar-title">姿态</span>
+          <button class="btn btn-green action-btn" data-action="sit">🧎 坐下</button>
+          <button class="btn btn-green action-btn" data-action="standup">🦶 站立</button>
+          <button class="btn btn-green action-btn" data-action="standdown">⬇ 趴下</button>
+          <button class="btn btn-green action-btn" data-action="stretch">🦴 伸懒腰</button>
+        </div>
+        <div class="actionbar">
+          <span class="actionbar-title">特技</span>
+          <button class="btn btn-orange action-btn" data-action="frontjump">⬆ 前跳</button>
+          <button class="btn btn-orange action-btn" data-action="frontflip">🔄 前空翻</button>
+          <button class="btn btn-orange action-btn" data-action="backflip">🔁 后空翻</button>
+          <button class="btn btn-purple action-btn" data-action="handstand">🤸 倒立</button>
           <span id="motionState" class="meta">--</span>
         </div>
 
+        <!-- 方向键快速面板 -->
+        <div class="card" style="padding:16px 20px">
+          <h2 style="margin:0 0 4px;font-size:15px;padding:0">🚶 方向控制</h2>
+          <p class="sub" style="margin:0 0 12px">按住方向键持续移动，松开自动停止。也可在「方向控制」页用滑块调速。</p>
+          <div class="drive-panel">
+            <div class="dpad" id="quickDpad">
+              <button class="dbtn" data-dir="forward">▲</button>
+              <button class="dbtn empty"></button>
+              <button class="dbtn" data-dir="turnLeft">↺</button>
+              <button class="dbtn" data-dir="left">◀</button>
+              <button class="dbtn stop" data-dir="stop">停</button>
+              <button class="dbtn" data-dir="right">▶</button>
+              <button class="dbtn" data-dir="backward">▼</button>
+              <button class="dbtn empty"></button>
+              <button class="dbtn" data-dir="turnRight">↻</button>
+            </div>
+            <div class="col">
+              <div class="label">速度档位</div>
+              <select id="quickSpeed" class="text-input cat-input" style="width:120px">
+                <option value="0.3">慢速</option>
+                <option value="0.6" selected>中速</option>
+                <option value="1.0">快速</option>
+              </select>
+              <div class="label" style="margin-top:6px">当前速度: <span id="curVel" style="color:var(--ok)">0</span></div>
+            </div>
+          </div>
+        </div>
+
         <footer>数据每秒刷新一次 · 画面通过 MJPEG 实时推送</footer>
+      </section>
+
+      <!-- 方向控制视图 -->
+      <section class="view" id="view-drive">
+        <header>
+          <h1>方向控制</h1>
+          <span id="driveMotionState" class="meta">--</span>
+        </header>
+
+        <div class="card">
+          <h2>十字方向键</h2>
+          <p class="sub">按住持续移动，松开自动停止。中间红色按钮立即停止。</p>
+          <div class="drive-panel">
+            <div class="dpad" id="mainDpad" style="grid-template-columns:repeat(3,70px);grid-template-rows:repeat(3,70px);gap:6px">
+              <button class="dbtn" data-dir="forward" style="width:70px;height:70px;font-size:26px">▲</button>
+              <button class="dbtn empty"></button>
+              <button class="dbtn" data-dir="turnLeft" style="width:70px;height:70px;font-size:22px">↺</button>
+              <button class="dbtn" data-dir="left" style="width:70px;height:70px;font-size:26px">◀</button>
+              <button class="dbtn stop" data-dir="stop" style="width:70px;height:70px;font-size:16px">停</button>
+              <button class="dbtn" data-dir="right" style="width:70px;height:70px;font-size:26px">▶</button>
+              <button class="dbtn" data-dir="backward" style="width:70px;height:70px;font-size:26px">▼</button>
+              <button class="dbtn empty"></button>
+              <button class="dbtn" data-dir="turnRight" style="width:70px;height:70px;font-size:22px">↻</button>
+            </div>
+            <div class="col">
+              <div class="label">前进速度 (vx)</div>
+              <input type="range" id="speedVx" class="speed-slider" min="-0.7" max="1.6" step="0.1" value="0.6">
+              <div class="label">侧移速度 (vy)</div>
+              <input type="range" id="speedVy" class="speed-slider" min="-0.4" max="0.4" step="0.05" value="0">
+              <div class="label">旋转速度 (vyaw)</div>
+              <input type="range" id="speedVyaw" class="speed-slider" min="-1.0" max="1.0" step="0.1" value="0.5">
+              <div class="label" style="margin-top:8px">当前: vx=<span id="showVx">0</span> vy=<span id="showVy">0</span> vyaw=<span id="showVyaw">0</span></div>
+              <button id="btnDriveOnce" class="btn btn-blue" style="margin-top:10px">按当前速度走 3 秒</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 组合动作视图 -->
+      <section class="view" id="view-sequence">
+        <header>
+          <h1>组合动作</h1>
+        </header>
+
+        <div class="seq-editor">
+          <h2>⛓ 动作组合编辑器</h2>
+          <div class="seq-add-row">
+            <select id="addType" style="width:110px">
+              <option value="action">特技动作</option>
+              <option value="move">移动指令</option>
+              <option value="delay">等待延时</option>
+            </select>
+            <select id="addAction" style="width:130px"></select>
+            <label>时长(s): <input id="addDuration" type="number" min="0" max="30" step="0.1" value="2" style="width:60px"></label>
+            <span id="addMoveParams" style="display:none">
+              <label>vx: <input id="addVx" type="number" step="0.1" value="0.5" style="width:50px"></label>
+              <label>vy: <input id="addVy" type="number" step="0.1" value="0" style="width:50px"></label>
+              <label>vyaw: <input id="addVyaw" type="number" step="0.1" value="0" style="width:50px"></label>
+            </span>
+            <button id="btnAddStep" class="btn btn-blue" style="padding:7px 14px;font-size:13px">+ 添加一步</button>
+          </div>
+          <div class="seq-list" id="seqList">
+            <div class="seq-item" style="justify-content:center;color:var(--muted)">还没有动作步骤，从上面添加</div>
+          </div>
+          <div class="seq-toolbar">
+            <button id="btnRunSeq" class="btn btn-green">▶ 执行组合</button>
+            <button id="btnClearSeq" class="btn btn-red" style="background:#2a1a1a;color:var(--err);border:1px solid var(--err)">🗑 清空</button>
+            <div class="spacer"></div>
+            <button id="btnPresetWave" class="btn btn-blue" style="padding:7px 14px;font-size:13px">预设：打招呼</button>
+            <button id="btnPresetPatrol" class="btn btn-blue" style="padding:7px 14px;font-size:13px">预设：巡逻一圈</button>
+          </div>
+        </div>
       </section>
 
       <!-- 人脸添加视图 -->
@@ -319,19 +539,9 @@
 
         <div class="card">
           <h2>注册人脸</h2>
-          <p class="sub">上传一张正脸清晰的照片，识别到该人脸时机器狗会播报姓名并按分类做动作。</p>
+          <p class="sub">上传一张正脸清晰的照片即可注册。注册后在下方「自定义动作」中编排动作并绑定给该人员。</p>
           <div class="faceform">
             <input id="faceName" class="text-input name-input" type="text" placeholder="姓名（如 张三）" maxlength="50">
-            <select id="faceCategory" class="text-input cat-input">
-              <option value="">分类：仅播报</option>
-              <option value="hello">挥手</option>
-              <option value="heart">比心</option>
-              <option value="dance1">跳舞1</option>
-              <option value="dance2">跳舞2</option>
-              <option value="sit">坐下</option>
-              <option value="standup">站立</option>
-              <option value="stretch">伸懒腰</option>
-            </select>
             <input id="faceFile" class="file-input" type="file" accept="image/*">
             <button id="faceBtn" class="btn btn-blue">注册人脸</button>
           </div>
@@ -339,8 +549,54 @@
 
         <div class="card">
           <h2>已注册人脸</h2>
+          <p class="sub">在每人右侧下拉框中选择其专属自定义动作；选择「无」表示仅播报。</p>
           <div class="facelist">
             <div id="faceTags" class="face-tags">
+              <span class="face-empty">加载中…</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 自定义动作 -->
+        <div class="seq-editor">
+          <h2>🎬 自定义动作</h2>
+          <p class="sub" style="margin:0 0 12px">定义一个动作序列 + 播报文本，保存后可绑定给任意已注册人员。识别到该人时先播报文本，再执行动作序列。</p>
+
+          <div class="seq-add-row">
+            <input id="caName" type="text" placeholder="动作名称（如 迎宾）" maxlength="30" style="width:170px">
+            <input id="caSay" type="text" placeholder="播报文本（如 你好，欢迎光临）" maxlength="200" style="flex:1;min-width:220px">
+          </div>
+
+          <div class="seq-add-row">
+            <select id="caStepType" style="width:110px">
+              <option value="action">特技动作</option>
+              <option value="move">移动指令</option>
+              <option value="delay">等待延时</option>
+            </select>
+            <select id="caStepAction" style="width:140px"></select>
+            <label>时长(s): <input id="caStepDuration" type="number" min="0" max="30" step="0.1" value="2" style="width:60px"></label>
+            <span id="caMoveParams" style="display:none">
+              <label>vx: <input id="caVx" type="number" step="0.1" value="0.5" style="width:50px"></label>
+              <label>vy: <input id="caVy" type="number" step="0.1" value="0" style="width:50px"></label>
+              <label>vyaw: <input id="caVyaw" type="number" step="0.1" value="0" style="width:50px"></label>
+            </span>
+            <button id="btnCaAddStep" class="btn btn-blue" style="padding:7px 14px;font-size:13px">+ 添加一步</button>
+          </div>
+
+          <div class="seq-list" id="caStepList">
+            <div class="seq-item" style="justify-content:center;color:var(--muted)">还没有动作步骤</div>
+          </div>
+
+          <div class="seq-toolbar">
+            <button id="btnCaSave" class="btn btn-green">💾 保存自定义动作</button>
+            <button id="btnCaReset" class="btn btn-red" style="background:#2a1a1a;color:var(--err);border:1px solid var(--err)">重置编辑</button>
+            <div class="spacer"></div>
+            <span class="meta" id="caEditing"></span>
+          </div>
+
+          <div class="facelist">
+            <h3>已保存的自定义动作</h3>
+            <div id="caList" class="face-tags">
               <span class="face-empty">加载中…</span>
             </div>
           </div>
@@ -375,6 +631,8 @@
   const navItems = document.querySelectorAll('.nav-item');
   const views = {
     live: document.getElementById('view-live'),
+    drive: document.getElementById('view-drive'),
+    sequence: document.getElementById('view-sequence'),
     face: document.getElementById('view-face'),
     detect: document.getElementById('view-detect')
   };
@@ -537,7 +795,6 @@
 
   // ── 人脸添加 ────────────────────────────────────────────────
   const faceName = document.getElementById('faceName');
-  const faceCategory = document.getElementById('faceCategory');
   const faceFile = document.getElementById('faceFile');
   const faceBtn = document.getElementById('faceBtn');
   const faceTags = document.getElementById('faceTags');
@@ -545,31 +802,51 @@
   const DEFAULT_AVATAR = "data:image/svg+xml;utf8," + encodeURIComponent(
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='#2a3140'/><circle cx='50' cy='40' r='18' fill='#5f6775'/><ellipse cx='50' cy='82' rx='24' ry='16' fill='#5f6775'/></svg>"
   );
+  window.DEFAULT_AVATAR = DEFAULT_AVATAR;
 
-  const CATEGORY_LABELS = {
-    hello: '挥手', heart: '比心', dance1: '跳舞1', dance2: '跳舞2',
-    sit: '坐下', standup: '站立', stretch: '伸懒腰'
-  };
+  // 已保存的自定义动作缓存（供人员下拉选择）
+  let customActionsCache = [];
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
 
   async function loadFaces() {
     try {
-      const r = await fetch('/api/faces', { cache: 'no-store' });
-      const faces = await r.json();
+      const [rf, ra] = await Promise.all([
+        fetch('/api/faces', { cache: 'no-store' }),
+        fetch('/api/custom_actions', { cache: 'no-store' })
+      ]);
+      const faces = await rf.json();
+      customActionsCache = (await ra.json()) || [];
       if (!faces || faces.length === 0) {
         faceTags.innerHTML = '<span class="face-empty">暂无已注册人脸</span>';
         return;
       }
+      const options = ['<option value="">无动作（仅播报姓名）</option>']
+        .concat(customActionsCache.map(a =>
+          `<option value="${esc(a.name)}">${esc(a.name)}</option>`))
+        .join('');
       faceTags.innerHTML = faces.map(f => {
         const name = f.name || f;
-        const cat = CATEGORY_LABELS[f.category] || '';
-        const catTag = cat ? `<span class="face-cat">${cat}</span>` : '';
-        return `<span class="face-tag"><img class="face-thumb" src="/api/face_image/${encodeURIComponent(name)}" alt="${name}" onerror="this.onerror=null;this.src=window.DEFAULT_AVATAR"><span class="face-name">${name}</span>${catTag}<button class="face-del" data-name="${name}" title="删除">×</button></span>`;
+        const action = f.action || '';
+        const opts = options.replace(
+          `value="${esc(action)}"`,
+          `value="${esc(action)}" selected`
+        );
+        return `<span class="face-tag">
+          <img class="face-thumb" src="/api/face_image/${encodeURIComponent(name)}" alt="${esc(name)}" onerror="this.onerror=null;this.src=window.DEFAULT_AVATAR">
+          <span class="face-name">${esc(name)}</span>
+          <select class="face-action-select" data-name="${esc(name)}" title="绑定自定义动作">${opts}</select>
+          <button class="face-del" data-name="${esc(name)}" title="删除">×</button>
+        </span>`;
       }).join('');
     } catch (e) {
       faceTags.innerHTML = '<span class="face-empty">加载失败</span>';
     }
   }
-  window.DEFAULT_AVATAR = DEFAULT_AVATAR;
 
   async function deleteFace(name) {
     if (!confirm(`确定删除「${name}」吗？`)) return;
@@ -591,6 +868,29 @@
     if (btn) deleteFace(btn.dataset.name);
   });
 
+  // 人员下拉绑定自定义动作
+  faceTags.addEventListener('change', async (e) => {
+    const sel = e.target.closest('.face-action-select');
+    if (!sel) return;
+    const name = sel.dataset.name;
+    const action = sel.value;
+    try {
+      const r = await fetch(`/api/face/${encodeURIComponent(name)}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        alert('绑定失败：' + (data.detail || ('HTTP ' + r.status)));
+        loadFaces();
+      }
+    } catch (err) {
+      alert('请求失败：' + err.message);
+      loadFaces();
+    }
+  });
+
   async function registerFace() {
     const name = faceName.value.trim();
     const file = faceFile.files[0];
@@ -602,13 +902,11 @@
       const fd = new FormData();
       fd.append('name', name);
       fd.append('image', file);
-      fd.append('category', faceCategory.value);
       const r = await fetch('/api/register_face', { method: 'POST', body: fd });
       const data = await r.json().catch(() => ({}));
       if (r.ok) {
         alert('注册成功：' + name);
         faceName.value = '';
-        faceCategory.value = '';
         faceFile.value = '';
         loadFaces();
       } else {
@@ -622,6 +920,182 @@
     }
   }
   faceBtn.addEventListener('click', registerFace);
+
+  // ── 自定义动作（动作序列 + 播报文本，可绑定给人员）────────────
+  const ACTION_LABELS = {
+    hello: '挥手', heart: '比心', dance1: '跳舞1', dance2: '跳舞2',
+    sit: '坐下', standup: '站立', standdown: '趴下', stretch: '伸懒腰',
+    frontwalk: '静态行走', trot: '小跑', ecomode: '经济步态',
+    frontjump: '前跳', frontflip: '前空翻', backflip: '后空翻', handstand: '倒立',
+  };
+
+  const caName = document.getElementById('caName');
+  const caSay = document.getElementById('caSay');
+  const caStepType = document.getElementById('caStepType');
+  const caStepAction = document.getElementById('caStepAction');
+  const caStepDuration = document.getElementById('caStepDuration');
+  const caMoveParams = document.getElementById('caMoveParams');
+  const caStepList = document.getElementById('caStepList');
+  const caList = document.getElementById('caList');
+  const caEditing = document.getElementById('caEditing');
+
+  let caSteps = [];
+  let caEditingName = '';
+
+  caStepType.addEventListener('change', () => {
+    caMoveParams.style.display = caStepType.value === 'move' ? 'inline' : 'none';
+  });
+
+  function describeStep(step) {
+    if (step.action) {
+      return { tag: '动作', cls: '', detail: ACTION_LABELS[step.action] || step.action };
+    }
+    if (step.move) {
+      return { tag: '移动', cls: '', detail: `vx=${step.move.vx}, vy=${step.move.vy}, vyaw=${step.move.vyaw}` };
+    }
+    if (step.stop_move) {
+      return { tag: '停止', cls: 'color:var(--err)', detail: '立即停止移动' };
+    }
+    if (step.delay != null) {
+      return { tag: '延时', cls: 'color:var(--warn)', detail: `等待 ${step.delay}s` };
+    }
+    return { tag: '?', cls: '', detail: '' };
+  }
+
+  function renderCaSteps() {
+    if (caSteps.length === 0) {
+      caStepList.innerHTML = '<div class="seq-item" style="justify-content:center;color:var(--muted)">还没有动作步骤</div>';
+      return;
+    }
+    caStepList.innerHTML = caSteps.map((step, idx) => {
+      const d = describeStep(step);
+      const dur = step.duration ? ` · ${step.duration}s` : '';
+      return `<div class="seq-item">
+        <span class="idx">#${idx + 1}</span>
+        <span class="tag" style="${d.cls}">${d.tag}</span>
+        <span class="detail">${esc(d.detail)}${dur}</span>
+        <button class="remove" data-idx="${idx}" title="删除">×</button>
+      </div>`;
+    }).join('');
+    caStepList.querySelectorAll('.remove').forEach(btn => {
+      btn.addEventListener('click', () => {
+        caSteps.splice(parseInt(btn.dataset.idx), 1);
+        renderCaSteps();
+      });
+    });
+  }
+
+  document.getElementById('btnCaAddStep').addEventListener('click', () => {
+    const type = caStepType.value;
+    const dur = parseFloat(caStepDuration.value) || 0;
+    if (type === 'action') {
+      caSteps.push({ action: caStepAction.value, duration: dur });
+    } else if (type === 'move') {
+      caSteps.push({
+        move: {
+          vx: parseFloat(document.getElementById('caVx').value) || 0,
+          vy: parseFloat(document.getElementById('caVy').value) || 0,
+          vyaw: parseFloat(document.getElementById('caVyaw').value) || 0,
+        },
+        duration: dur
+      });
+    } else {
+      caSteps.push({ delay: dur });
+    }
+    renderCaSteps();
+  });
+
+  function resetCaEditor() {
+    caName.value = '';
+    caSay.value = '';
+    caSteps = [];
+    caEditingName = '';
+    caEditing.textContent = '';
+    renderCaSteps();
+  }
+
+  document.getElementById('btnCaReset').addEventListener('click', resetCaEditor);
+
+  async function loadCustomActions() {
+    try {
+      const r = await fetch('/api/custom_actions', { cache: 'no-store' });
+      customActionsCache = (await r.json()) || [];
+      if (customActionsCache.length === 0) {
+        caList.innerHTML = '<span class="face-empty">还没有自定义动作</span>';
+        return;
+      }
+      caList.innerHTML = customActionsCache.map(a => `
+        <span class="face-tag">
+          <span class="face-name">${esc(a.name)}</span>
+          <span class="face-cat">${(a.steps || []).length} 步</span>
+          ${a.say ? `<span style="color:var(--muted);font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">“${esc(a.say)}”</span>` : ''}
+          <button class="face-edit" data-name="${esc(a.name)}" title="编辑">✎</button>
+          <button class="face-del" data-name="${esc(a.name)}" title="删除">×</button>
+        </span>`).join('');
+    } catch (e) {
+      caList.innerHTML = '<span class="face-empty">加载失败</span>';
+    }
+  }
+
+  caList.addEventListener('click', async (e) => {
+    const editBtn = e.target.closest('.face-edit');
+    if (editBtn) {
+      const item = customActionsCache.find(a => a.name === editBtn.dataset.name);
+      if (!item) return;
+      caEditingName = item.name;
+      caName.value = item.name;
+      caSay.value = item.say || '';
+      caSteps = JSON.parse(JSON.stringify(item.steps || []));
+      caEditing.textContent = `正在编辑：${item.name}`;
+      renderCaSteps();
+      return;
+    }
+    const delBtn = e.target.closest('.face-del');
+    if (delBtn) {
+      const name = delBtn.dataset.name;
+      if (!confirm(`确定删除自定义动作「${name}」吗？相关人员的绑定也会解除。`)) return;
+      try {
+        const r = await fetch('/api/custom_actions/' + encodeURIComponent(name), { method: 'DELETE' });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          alert('删除失败：' + (data.detail || ('HTTP ' + r.status)));
+          return;
+        }
+        if (caEditingName === name) resetCaEditor();
+        await loadCustomActions();
+        loadFaces();  // 人员下拉同步刷新
+      } catch (err) {
+        alert('请求失败：' + err.message);
+      }
+    }
+  });
+
+  document.getElementById('btnCaSave').addEventListener('click', async () => {
+    const name = caName.value.trim();
+    if (!name) { caName.focus(); return; }
+    if (caSteps.length === 0) { alert('请至少添加一步动作'); return; }
+    try {
+      const r = await fetch('/api/custom_actions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, say: caSay.value.trim(), steps: caSteps })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        alert('保存失败：' + (data.detail || ('HTTP ' + r.status)));
+        return;
+      }
+      caEditingName = name;
+      caEditing.textContent = `已保存：${name}`;
+      await loadCustomActions();
+      loadFaces();  // 人员下拉同步刷新
+    } catch (e) {
+      alert('请求失败：' + e.message);
+    }
+  });
+
+  renderCaSteps();
+  loadCustomActions();
   loadFaces();
 
   // ── 视频检测 ────────────────────────────────────────────────
@@ -665,6 +1139,304 @@
 
   detectBtn.addEventListener('click', doDetect);
   stopBtn.addEventListener('click', stopDetect);
+
+  // ══════════════════════════════════════════════════════════════
+  // 方向键控制（按住→移动，松开→停止）
+  // ══════════════════════════════════════════════════════════════
+
+  // 方向 → 速度 (vx, vy, vyaw) 映射，系数由 speedScale 控制
+  const DIR_MAP = {
+    forward:   { vx: 1,  vy: 0,  vyaw: 0 },
+    backward:  { vx: -1, vy: 0,  vyaw: 0 },
+    left:      { vx: 0,  vy: 1,  vyaw: 0 },
+    right:     { vx: 0,  vy: -1, vyaw: 0 },
+    turnLeft:  { vx: 0,  vy: 0,  vyaw: 1 },
+    turnRight: { vx: 0,  vy: 0,  vyaw: -1 },
+  };
+
+  // 方向键通用绑定：支持 mouse/touch/keyboard
+  function bindDpad(container, getScale) {
+    const buttons = container.querySelectorAll('.dbtn[data-dir]');
+    let activeDir = null;
+
+    async function sendMove(dir, pressed) {
+      if (pressed) {
+        const speed = getScale();
+        const d = DIR_MAP[dir];
+        if (!d) return;
+        const vx = (d.vx || 0) * speed;
+        const vy = (d.vy || 0) * speed * 0.5;       // 侧移速度减半（机器狗侧移慢）
+        const vyaw = (d.vyaw || 0) * speed;
+        try {
+          await fetch('/api/move', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ vx, vy, vyaw })
+          });
+        } catch (e) { /* 忽略网络错误 */ }
+      } else {
+        try { await fetch('/api/stop_move', { method: 'POST' }); } catch (e) {}
+      }
+    }
+
+    buttons.forEach(btn => {
+      const dir = btn.dataset.dir;
+      if (dir === 'stop') {
+        btn.addEventListener('click', async () => {
+          activeDir = null;
+          buttons.forEach(b => b.classList.remove('pressed'));
+          try { await fetch('/api/stop_move', { method: 'POST' }); } catch (e) {}
+        });
+        return;
+      }
+
+      const start = (e) => {
+        e.preventDefault();
+        activeDir = dir;
+        btn.classList.add('pressed');
+        sendMove(dir, true);
+      };
+      const end = (e) => {
+        e && e.preventDefault && e.preventDefault();
+        if (activeDir === dir) {
+          activeDir = null;
+          btn.classList.remove('pressed');
+          sendMove(dir, false);
+        } else {
+          btn.classList.remove('pressed');
+        }
+      };
+
+      btn.addEventListener('mousedown', start);
+      btn.addEventListener('mouseup', end);
+      btn.addEventListener('mouseleave', end);
+      btn.addEventListener('touchstart', start, { passive: false });
+      btn.addEventListener('touchend', end);
+    });
+
+    // 键盘方向键映射到 quickDpad（最通用）
+    if (container.id === 'quickDpad') {
+      const keyMap = {
+        'ArrowUp': 'forward', 'ArrowDown': 'backward',
+        'ArrowLeft': 'left', 'ArrowRight': 'right',
+        'q': 'turnLeft', 'e': 'turnRight',
+        'w': 'forward', 's': 'backward', 'a': 'left', 'd': 'right',
+      };
+      document.addEventListener('keydown', (e) => {
+        if (e.repeat) return;
+        const dir = keyMap[e.key];
+        if (dir) {
+          e.preventDefault();
+          const btn = container.querySelector(`.dbtn[data-dir="${dir}"]`);
+          if (btn && !btn.classList.contains('pressed')) {
+            btn.classList.add('pressed');
+            sendMove(dir, true);
+          }
+        }
+        if (e.key === ' ') {
+          e.preventDefault();
+          container.querySelectorAll('.dbtn').forEach(b => b.classList.remove('pressed'));
+          sendMove('stop', false);
+        }
+      });
+      document.addEventListener('keyup', (e) => {
+        const dir = keyMap[e.key];
+        if (dir) {
+          const btn = container.querySelector(`.dbtn[data-dir="${dir}"]`);
+          if (btn) {
+            btn.classList.remove('pressed');
+            sendMove(dir, false);
+          }
+        }
+      });
+    }
+  }
+
+  // 快速方向键：速度由 quickSpeed 下拉决定
+  const quickSpeed = document.getElementById('quickSpeed');
+  bindDpad(document.getElementById('quickDpad'), () => parseFloat(quickSpeed.value));
+
+  // 主方向控制页：速度由滑块决定
+  const speedVx = document.getElementById('speedVx');
+  const speedVy = document.getElementById('speedVy');
+  const speedVyaw = document.getElementById('speedVyaw');
+  const showVx = document.getElementById('showVx');
+  const showVy = document.getElementById('showVy');
+  const showVyaw = document.getElementById('showVyaw');
+  function updateDriveDisplay() {
+    showVx.textContent = speedVx.value;
+    showVy.textContent = speedVy.value;
+    showVyaw.textContent = speedVyaw.value;
+  }
+  [speedVx, speedVy, speedVyaw].forEach(s => s.addEventListener('input', updateDriveDisplay));
+  updateDriveDisplay();
+
+  bindDpad(document.getElementById('mainDpad'), () => Math.max(Math.abs(parseFloat(speedVx.value)), 0.3));
+
+  document.getElementById('btnDriveOnce').addEventListener('click', async () => {
+    try {
+      await fetch('/api/sequence', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ steps: [
+          { vx: parseFloat(speedVx.value), vy: parseFloat(speedVy.value), vyaw: parseFloat(speedVyaw.value), duration: 3.0 },
+          { stop_move: true }
+        ]})
+      });
+    } catch (e) { alert('请求失败：' + e.message); }
+  });
+
+  // 更新当前速度显示
+  const curVelEl = document.getElementById('curVel');
+  setInterval(async () => {
+    try {
+      const r = await fetch('/api/motion', { cache: 'no-store' });
+      const m = await r.json();
+      const ms = document.getElementById('driveMotionState');
+      if (ms) ms.textContent = m.ready ? '已就绪' : '未就绪';
+      curVelEl.textContent = m.ready ? parseFloat(quickSpeed.value).toFixed(1) + ' m/s' : '未就绪';
+    } catch (e) {}
+  }, 1500);
+
+  // ══════════════════════════════════════════════════════════════
+  // 组合动作编辑器
+  // ══════════════════════════════════════════════════════════════
+
+  let seqSteps = [];
+
+  // 加载动作列表填充下拉（组合动作页 + 自定义动作页共用）
+  async function loadActionOptions() {
+    try {
+      const r = await fetch('/api/actions', { cache: 'no-store' });
+      const data = await r.json();
+      const cats = {};
+      (data.actions || []).forEach(a => {
+        if (!cats[a.category]) cats[a.category] = [];
+        cats[a.category].push(a);
+      });
+      ['addAction', 'caStepAction'].forEach(id => {
+        const sel = document.getElementById(id);
+        if (!sel) return;
+        sel.innerHTML = '';
+        Object.entries(cats).forEach(([cat, list]) => {
+          const g = document.createElement('optgroup');
+          g.label = cat;
+          list.forEach(a => {
+            const opt = document.createElement('option');
+            opt.value = a.name;
+            opt.textContent = a.label + ` (${a.name})`;
+            g.appendChild(opt);
+          });
+          sel.appendChild(g);
+        });
+      });
+    } catch (e) {}
+  }
+  loadActionOptions();
+
+  const addType = document.getElementById('addType');
+  const addMoveParams = document.getElementById('addMoveParams');
+  addType.addEventListener('change', () => {
+    addMoveParams.style.display = addType.value === 'move' ? 'inline' : 'none';
+    document.getElementById('addDuration').value = addType.value === 'delay' ? 2 : 2;
+  });
+
+  function renderSeq() {
+    const list = document.getElementById('seqList');
+    if (seqSteps.length === 0) {
+      list.innerHTML = '<div class="seq-item" style="justify-content:center;color:var(--muted)">还没有动作步骤，从上面添加</div>';
+      return;
+    }
+    list.innerHTML = seqSteps.map((step, idx) => {
+      let tag = '', detail = '';
+      if (step.action) {
+        tag = '<span class="tag">动作</span>';
+        detail = `${ACTION_LABELS[step.action] || step.action}`;
+      } else if (step.move) {
+        tag = '<span class="tag">移动</span>';
+        detail = `vx=${step.move.vx}, vy=${step.move.vy}, vyaw=${step.move.vyaw}`;
+      } else if (step.stop_move) {
+        tag = '<span class="tag" style="color:var(--err)">停止</span>';
+        detail = '立即停止移动';
+      } else if (step.delay != null) {
+        tag = '<span class="tag" style="color:var(--warn)">延时</span>';
+        detail = `等待 ${step.delay}s`;
+      }
+      const dur = step.duration ? ` · ${step.duration}s` : '';
+      return `<div class="seq-item">
+        <span class="idx">#${idx + 1}</span>${tag}
+        <span class="detail">${detail}${dur}</span>
+        <button class="remove" data-idx="${idx}" title="删除">×</button>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('.remove').forEach(btn => {
+      btn.addEventListener('click', () => {
+        seqSteps.splice(parseInt(btn.dataset.idx), 1);
+        renderSeq();
+      });
+    });
+  }
+
+  document.getElementById('btnAddStep').addEventListener('click', () => {
+    const type = addType.value;
+    const dur = parseFloat(document.getElementById('addDuration').value) || 0;
+    if (type === 'action') {
+      seqSteps.push({ action: document.getElementById('addAction').value, duration: dur });
+    } else if (type === 'move') {
+      seqSteps.push({
+        move: {
+          vx: parseFloat(document.getElementById('addVx').value) || 0,
+          vy: parseFloat(document.getElementById('addVy').value) || 0,
+          vyaw: parseFloat(document.getElementById('addVyaw').value) || 0,
+        },
+        duration: dur
+      });
+    } else if (type === 'delay') {
+      seqSteps.push({ delay: dur });
+    }
+    renderSeq();
+  });
+
+  document.getElementById('btnRunSeq').addEventListener('click', async () => {
+    if (seqSteps.length === 0) { alert('请先添加动作步骤'); return; }
+    try {
+      const r = await fetch('/api/sequence', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ steps: seqSteps })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) alert('执行失败：' + (data.detail || ('HTTP ' + r.status)));
+    } catch (e) { alert('请求失败：' + e.message); }
+  });
+
+  document.getElementById('btnClearSeq').addEventListener('click', () => {
+    seqSteps = [];
+    renderSeq();
+  });
+
+  // 预设组合
+  document.getElementById('btnPresetWave').addEventListener('click', () => {
+    seqSteps = [
+      { action: 'standup', duration: 2 },
+      { action: 'hello', duration: 3 },
+      { action: 'sit', duration: 2 },
+    ];
+    renderSeq();
+  });
+  document.getElementById('btnPresetPatrol').addEventListener('click', () => {
+    seqSteps = [
+      { action: 'standup', duration: 2 },
+      { move: { vx: 0.6, vy: 0, vyaw: 0 }, duration: 3 },
+      { move: { vx: 0, vy: 0, vyaw: 0.5 }, duration: 3 },
+      { move: { vx: 0.6, vy: 0, vyaw: 0 }, duration: 3 },
+      { move: { vx: 0, vy: 0, vyaw: -0.5 }, duration: 3 },
+      { stop_move: true },
+    ];
+    renderSeq();
+  });
+
+  renderSeq();
 </script>
 </body>
 </html>
