@@ -9,12 +9,13 @@ import uuid
 from pathlib import Path
 from typing import Optional, Protocol
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .frame import Frame
 from .paths import resource_dir
+from . import params as algo_params
 
 _INDEX_HTML = (resource_dir() / "go2x_stream" / "web" / "index.html").read_text(encoding="utf-8")
 
@@ -71,6 +72,8 @@ class FaceTriggerRequest(BaseModel):
     say: str = ""
     steps: list = []
     cooldown: float = 10.0
+    sit_first: bool = True
+    settle_s: float = 2.0
 
 
 class FaceStopRequest(BaseModel):
@@ -125,6 +128,39 @@ def create_app(stream: VideoSource, chat=None) -> FastAPI:
         """返回页面配置所需的机器狗 IP（AES 密钥不返回，仅 IP）。"""
         st = stream.status()
         return JSONResponse({"ip": st.get("ip", "")})
+
+    # ─── 算法参数 ───────────────────────────────────────────────
+
+    @app.get("/api/params")
+    async def params_get() -> JSONResponse:
+        """返回算法参数定义、当前值与默认值。"""
+        return JSONResponse(algo_params.snapshot())
+
+    @app.post("/api/params")
+    async def params_save(request: Request) -> JSONResponse:
+        """保存页面提交的算法参数（尽量热更新，部分需重启生效）。"""
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+        try:
+            result = await asyncio.to_thread(algo_params.update, stream, chat, payload)
+            return JSONResponse(result)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    @app.post("/api/params/reset")
+    async def params_reset() -> JSONResponse:
+        """把算法参数恢复为默认值。"""
+        try:
+            result = await asyncio.to_thread(algo_params.reset, stream, chat)
+            return JSONResponse(result)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
 
     @app.post("/api/connect")
     async def connect(req: ConnectRequest) -> JSONResponse:
@@ -277,16 +313,22 @@ def create_app(stream: VideoSource, chat=None) -> FastAPI:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.post("/api/register_face")
-    async def register_face(
-        name: str = Form(...),
-        image: UploadFile = File(...),
-    ):
-        register_fn = getattr(stream, "register_face", None)
+    async def register_face(request: Request):
+        """注册/追加人脸样本；支持一次上传多张（字段名 images，兼容旧的 image）。"""
+        register_fn = getattr(stream, "register_faces", None)
         if not callable(register_fn):
             raise HTTPException(status_code=400, detail="当前模式不支持人脸注册（启动服务时需加 --face）")
-        data = await image.read()
+        form = await request.form()
+        name = str(form.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="请填写姓名")
+        # Starlette 的 form() 返回的是它自己的 UploadFile，用「非字符串」判断最稳
+        files = [v for _, v in form.multi_items() if not isinstance(v, str)]
+        if not files:
+            raise HTTPException(status_code=400, detail="请至少上传一张人脸图片")
+        payload = [await f.read() for f in files]
         try:
-            result = await asyncio.to_thread(register_fn, name, data)
+            result = await asyncio.to_thread(register_fn, name, payload)
             return JSONResponse(result)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
@@ -342,7 +384,10 @@ def create_app(stream: VideoSource, chat=None) -> FastAPI:
     async def face_trigger_get() -> JSONResponse:
         fn = getattr(stream, "face_trigger_get", None)
         if not callable(fn):
-            return JSONResponse({"enabled": False, "say": "", "steps": [], "cooldown": 10.0})
+            return JSONResponse({
+                "enabled": False, "say": "", "steps": [], "cooldown": 10.0,
+                "sit_first": True, "settle_s": 2.0,
+            })
         return JSONResponse(fn())
 
     @app.post("/api/face_trigger")

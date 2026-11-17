@@ -259,6 +259,20 @@ class Go2WebRtcStream:
                 pass
         return self.status()
 
+    def update_tuning(
+        self,
+        jpeg_quality: Optional[int] = None,
+        face_interval: Optional[float] = None,
+        say_cooldown: Optional[float] = None,
+    ) -> None:
+        """运行时更新视频/人脸算法参数（页面「算法参数」保存时调用）。"""
+        if jpeg_quality is not None:
+            self._jpeg_quality = max(1, min(100, int(jpeg_quality)))
+        if face_interval is not None:
+            self._face_interval = max(0.1, float(face_interval))
+        if say_cooldown is not None:
+            self._say_cooldown = max(0.0, float(say_cooldown))
+
     def sport_ready(self) -> bool:
         """WebRTC 数据通道是否可用（运动指令依赖它）。"""
         conn = self._conn
@@ -306,26 +320,54 @@ class Go2WebRtcStream:
 
     def register_face(self, name: str, image_bytes: bytes) -> dict:
         """从上传的图片字节注册人脸（需已启用人脸识别）。"""
+        return self.register_faces(name, [image_bytes])
+
+    def register_faces(self, name: str, images: list[bytes]) -> dict:
+        """批量注册同一个人的多张照片（多模板），返回汇总结果。"""
         if self._face_recognizer is None:
             raise RuntimeError("未启用人脸识别（启动服务时需加 --face）")
         import numpy as np
 
-        img = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if img is None:
-            raise RuntimeError("无法解码图片，请上传 JPG/PNG 格式")
-        self._face_recognizer.register_image(name, img)
+        results: list[dict] = []
+        added = 0
+        for data in images or []:
+            img = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                results.append({"ok": False, "detail": "无法解码图片，请上传 JPG/PNG 格式"})
+                continue
+            try:
+                info = self._face_recognizer.register_image(name, img)
+            except Exception as exc:
+                results.append({"ok": False, "detail": str(exc)})
+                continue
+            results.append({"ok": True, **info})
+            if info.get("added"):
+                added += 1
+        if not any(r.get("ok") for r in results):
+            detail = results[0]["detail"] if results else "未提供图片"
+            raise RuntimeError(detail)
         # 预生成默认播报语音，识别时无需再合成
         prewarm(f"识别到{name}")
-        return {"ok": True, "name": name}
+        return {
+            "ok": True,
+            "name": name,
+            "added": added,
+            "templates": self._face_recognizer.template_count(name),
+            "results": results,
+        }
 
     def registered_faces(self) -> list[dict]:
-        """返回已注册的人脸列表（含姓名与绑定的自定义动作名）。"""
+        """返回已注册的人脸列表（含姓名、模板数与绑定的自定义动作名）。"""
         if self._face_recognizer is None:
             return []
         faces = []
         for n in self._face_recognizer.registered_names():
             action = self._custom_actions.assignment_of(n) if self._custom_actions else ""
-            faces.append({"name": n, "action": action})
+            faces.append({
+                "name": n,
+                "action": action,
+                "templates": self._face_recognizer.template_count(n),
+            })
         return faces
 
     def do_action(self, action: str) -> dict:
@@ -625,9 +667,15 @@ class Go2WebRtcStream:
 
         say_text = (cfg.get("say") or "").strip()
         steps = cfg.get("steps") or []
+        sit_first = bool(cfg.get("sit_first", True))
+        try:
+            settle_s = max(0.0, float(cfg.get("settle_s", 2.0)))
+        except (TypeError, ValueError):
+            settle_s = 2.0
         logger.info(
-            "检测到未识别的人脸，触发通用动作（播报: %s，%d 步）",
+            "检测到未识别的人脸，触发通用动作（播报: %s，%d 步，%s）",
             say_text or "无", len(steps),
+            f"先坐下稳定 {settle_s:.1f}s" if sit_first else "直接执行",
         )
 
         def _say() -> None:
@@ -638,14 +686,20 @@ class Go2WebRtcStream:
 
         def _run() -> None:
             motion = self._motion
-            if motion is not None:
-                try:
-                    # 先站立，站起来之后再播报/做动作
-                    motion.do_sequence(
-                        [{"action": "standup", "duration": 2.5}], wait=True
-                    )
-                except Exception as exc:
-                    logger.warning("人脸触发起立失败: %s", exc)
+            if sit_first:
+                # 先坐下让画面稳定，再重新识别一次：能认出人就交给个性化播报
+                if motion is not None:
+                    try:
+                        motion.do_sequence(
+                            [{"action": "sit", "duration": 1.5}], wait=True
+                        )
+                    except Exception as exc:
+                        logger.warning("人脸触发坐下失败: %s", exc)
+                if settle_s > 0:
+                    time.sleep(settle_s)
+                if not self._still_unknown():
+                    logger.info("坐稳后重新识别成功，跳过通用动作")
+                    return
             if say_text:
                 # 播报与动作并行：音频走 audiohub，动作走 sport 通道，互不阻塞
                 threading.Thread(
@@ -659,11 +713,34 @@ class Go2WebRtcStream:
 
         threading.Thread(target=_run, name="go2-face-trigger", daemon=True).start()
 
+    def _still_unknown(self) -> bool:
+        """坐稳后用最新画面重新识别一次；能认出已注册的人则返回 False。"""
+        recognizer = self._face_recognizer
+        frame = self.latest_frame()
+        if recognizer is None or frame is None:
+            return True
+        try:
+            import numpy as np
+
+            img = cv2.imdecode(
+                np.frombuffer(frame.jpeg, dtype=np.uint8), cv2.IMREAD_COLOR
+            )
+            if img is None:
+                return True
+            candidates, _ = recognizer.match_faces(img)
+            return not self._accept_faces(candidates)
+        except Exception as exc:
+            logger.warning("稳定画面后重新识别失败: %s", exc)
+            return True
+
     # ─── 人脸触发 / 暂停移动配置 ─────────────────────────────────
 
     def face_trigger_get(self) -> dict:
         if self._face_trigger is None:
-            return {"enabled": False, "say": "", "steps": [], "cooldown": 10.0}
+            return {
+                "enabled": False, "say": "", "steps": [], "cooldown": 10.0,
+                "sit_first": True, "settle_s": 2.0,
+            }
         return self._face_trigger.get()
 
     def face_trigger_save(self, payload: dict) -> dict:

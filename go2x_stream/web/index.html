@@ -232,6 +232,13 @@
     border-radius: 999px;
     margin-right: 2px;
   }
+  .face-count {
+    font-size: 11px;
+    color: var(--ok);
+    background: #14261d;
+    padding: 1px 7px;
+    border-radius: 999px;
+  }
   .face-del {
     width: 20px;
     height: 20px;
@@ -353,6 +360,21 @@
   .seq-toolbar { display: flex; gap: 8px; align-items: center; }
   .seq-toolbar .spacer { flex: 1; }
 
+  /* 算法参数视图 */
+  .param-row {
+    display: flex; align-items: flex-start; gap: 14px;
+    padding: 12px 0; border-top: 1px solid var(--border); flex-wrap: wrap;
+  }
+  .param-row:first-of-type { border-top: none; padding-top: 0; }
+  .param-label { width: 170px; font-size: 14px; padding-top: 7px; flex-shrink: 0; }
+  .param-input { width: 120px; flex: 0 0 auto; }
+  .param-unit { font-size: 13px; color: var(--muted); padding-top: 8px; min-width: 30px; }
+  .param-desc { flex: 1; min-width: 240px; font-size: 12px; color: var(--muted); line-height: 1.7; padding-top: 7px; }
+  .tag-restart {
+    display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+    font-size: 11px; color: var(--warn); background: #2a2410; border: 1px solid #4a3d10;
+  }
+
   footer { font-size: 12px; color: #5f6775; }
 </style>
 </head>
@@ -378,6 +400,9 @@
         </button>
         <button class="nav-item" data-view="detect">
           <span class="ico">▷</span>视频检测
+        </button>
+        <button class="nav-item" data-view="params">
+          <span class="ico">⚙</span>算法参数
         </button>
       </nav>
     </aside>
@@ -470,6 +495,7 @@
             <button id="chatSend" class="btn btn-blue" style="padding:8px 16px;font-size:13px">发送</button>
             <span id="chatState" class="meta">--</span>
           </div>
+          <div id="chatAsr" class="detect-meta" style="margin:0 0 6px">🎤 最近识别：--</div>
           <div id="chatLog" class="detect-meta" style="margin:0">暂无对话</div>
         </div>
 
@@ -590,10 +616,10 @@
 
         <div class="card">
           <h2>注册人脸</h2>
-          <p class="sub">上传一张正脸清晰的照片即可注册。注册后在下方「自定义动作」中编排动作并绑定给该人员。</p>
+          <p class="sub">可一次选多张（建议 3～5 张：正脸 + 左右各 30～45° 侧脸，光照正常、不要模糊）。同一人多张样本会一起参与识别，走动/侧脸时更稳。注册后在下方「自定义动作」中编排动作并绑定给该人员。</p>
           <div class="faceform">
             <input id="faceName" class="text-input name-input" type="text" placeholder="姓名（如 张三）" maxlength="50">
-            <input id="faceFile" class="file-input" type="file" accept="image/*">
+            <input id="faceFile" class="file-input" type="file" accept="image/*" multiple>
             <button id="faceBtn" class="btn btn-blue">注册人脸</button>
           </div>
         </div>
@@ -684,6 +710,11 @@
           </div>
 
           <div class="seq-add-row">
+            <label><input id="ftSitFirst" type="checkbox" checked> 未认出时先坐下，稳定画面后重新识别</label>
+            <label>稳定时长(秒): <input id="ftSettle" type="number" min="0" max="30" step="0.5" value="2" style="width:72px"></label>
+          </div>
+
+          <div class="seq-add-row">
             <input id="ftSay" type="text" placeholder="播报文本，例如：你好呀" maxlength="200" style="flex:1;min-width:240px">
           </div>
 
@@ -736,6 +767,24 @@
           <img id="detectVideo" alt="检测视频流">
         </div>
       </section>
+
+      <!-- 算法参数视图 -->
+      <section class="view" id="view-params">
+        <header>
+          <h1>算法参数</h1>
+          <span class="meta">保存后立即写入 config.json，标记「重启生效」的参数需重启服务</span>
+          <span class="spacer"></span>
+          <span id="paramsState" class="meta">--</span>
+        </header>
+
+        <div id="paramsGroups" style="display:flex;flex-direction:column;gap:16px"></div>
+
+        <div class="seq-toolbar">
+          <button id="paramsSave" class="btn btn-green">💾 保存并应用</button>
+          <button id="paramsReset" class="btn btn-red" style="background:#2a1a1a;color:var(--err);border:1px solid var(--err)">↺ 还原默认值</button>
+          <span id="paramsHint" class="meta"></span>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -748,7 +797,8 @@
     sequence: document.getElementById('view-sequence'),
     face: document.getElementById('view-face'),
     trigger: document.getElementById('view-trigger'),
-    detect: document.getElementById('view-detect')
+    detect: document.getElementById('view-detect'),
+    params: document.getElementById('view-params')
   };
   navItems.forEach(item => {
     item.addEventListener('click', () => {
@@ -760,6 +810,7 @@
       if (item.dataset.view === 'face') loadFaces();
       if (item.dataset.view === 'trigger') loadFaceTrigger();
       if (item.dataset.view === 'drive') loadRoute();
+      if (item.dataset.view === 'params') loadParams();
     });
   });
 
@@ -955,6 +1006,7 @@
         return `<span class="face-tag">
           <img class="face-thumb" src="/api/face_image/${encodeURIComponent(name)}" alt="${esc(name)}" onerror="this.onerror=null;this.src=window.DEFAULT_AVATAR">
           <span class="face-name">${esc(name)}</span>
+          <span class="face-count" title="已注册的模板数">${f.templates || 1} 张</span>
           <select class="face-action-select" data-name="${esc(name)}" title="绑定自定义动作">${opts}</select>
           <button class="face-del" data-name="${esc(name)}" title="删除">×</button>
         </span>`;
@@ -1009,19 +1061,28 @@
 
   async function registerFace() {
     const name = faceName.value.trim();
-    const file = faceFile.files[0];
+    const files = Array.from(faceFile.files || []);
     if (!name) { faceName.focus(); return; }
-    if (!file) { alert('请选择要注册的人脸图片'); return; }
+    if (files.length === 0) { alert('请选择要注册的人脸图片（可多选）'); return; }
     faceBtn.disabled = true;
     faceBtn.textContent = '注册中…';
     try {
       const fd = new FormData();
       fd.append('name', name);
-      fd.append('image', file);
+      files.forEach(f => fd.append('images', f));
       const r = await fetch('/api/register_face', { method: 'POST', body: fd });
       const data = await r.json().catch(() => ({}));
       if (r.ok) {
-        alert('注册成功：' + name);
+        const added = data.added || 0;
+        const skipped = (data.results || []).filter(x => !x.added && x.ok).length;
+        const failed = (data.results || []).filter(x => !x.ok);
+        let msg = `注册成功：${name}\n新增 ${added} 张，当前共 ${data.templates || 0} 张模板`;
+        if (skipped) msg += `\n跳过 ${skipped} 张（与已有样本过于相似）`;
+        if (failed.length) {
+          msg += '\n失败 ' + failed.length + ' 张：\n' +
+            failed.map(x => '· ' + x.detail).join('\n');
+        }
+        alert(msg);
         faceName.value = '';
         faceFile.value = '';
         loadFaces();
@@ -1794,6 +1855,8 @@
   const ftToggle = document.getElementById('ftToggle');
   const ftSay = document.getElementById('ftSay');
   const ftCooldown = document.getElementById('ftCooldown');
+  const ftSitFirst = document.getElementById('ftSitFirst');
+  const ftSettle = document.getElementById('ftSettle');
   const ftStepType = document.getElementById('ftStepType');
   const ftStepAction = document.getElementById('ftStepAction');
   const ftStepDuration = document.getElementById('ftStepDuration');
@@ -1845,6 +1908,8 @@
       const d = await r.json();
       ftSay.value = d.say || '';
       ftCooldown.value = d.cooldown != null ? d.cooldown : 10;
+      ftSitFirst.checked = d.sit_first !== false;
+      ftSettle.value = d.settle_s != null ? d.settle_s : 2;
       ftSteps = Array.isArray(d.steps) ? d.steps : [];
       setFtEnabled(!!d.enabled);
       ftState.textContent = d.enabled ? '触发中' : '已关闭';
@@ -1861,7 +1926,9 @@
       enabled: ftEnabled,
       say: ftSay.value.trim(),
       steps: ftSteps,
-      cooldown: parseFloat(ftCooldown.value) || 0
+      cooldown: parseFloat(ftCooldown.value) || 0,
+      sit_first: ftSitFirst.checked,
+      settle_s: parseFloat(ftSettle.value) || 0
     }, extra || {});
     const r = await fetch('/api/face_trigger', {
       method: 'POST',
@@ -1979,6 +2046,7 @@
   const chatToggle = document.getElementById('chatToggle');
   const chatState = document.getElementById('chatState');
   const chatLog = document.getElementById('chatLog');
+  const chatAsr = document.getElementById('chatAsr');
   const chatAsk = document.getElementById('chatAsk');
   const chatSend = document.getElementById('chatSend');
   const chatWake = document.getElementById('chatWake');
@@ -2000,6 +2068,7 @@
       let st = s.in_session ? '会话中' : (s.listening ? '监听中' : '已停止');
       if (!s.api_ready) st += ' · 未配置 API Key';
       chatState.textContent = st;
+      chatAsr.textContent = s.last_asr ? '🎤 最近识别：' + s.last_asr : '🎤 最近识别：--';
       if (s.last_text || s.last_reply) {
         chatLog.innerHTML = `<div>🧑 ${esc(s.last_text || '')}</div><div>🐕 ${esc(s.last_reply || '')}</div>`;
       }
@@ -2050,6 +2119,123 @@
 
   refreshChat();
   setInterval(refreshChat, 1500);
+
+  // ══════════════════════════════════════════════════════════════
+  // 算法参数面板
+  // ══════════════════════════════════════════════════════════════
+  const paramsGroups = document.getElementById('paramsGroups');
+  const paramsState = document.getElementById('paramsState');
+  const paramsHint = document.getElementById('paramsHint');
+  const paramsSave = document.getElementById('paramsSave');
+  const paramsReset = document.getElementById('paramsReset');
+  let paramsSpecs = [];
+
+  function specLabel(key) {
+    const spec = paramsSpecs.find(s => s.key === key);
+    return spec ? spec.label : key;
+  }
+
+  function renderParams(data) {
+    paramsSpecs = data.specs || [];
+    paramsGroups.innerHTML = '';
+    const groups = {};
+    paramsSpecs.forEach(s => {
+      (groups[s.group] = groups[s.group] || []).push(s);
+    });
+    Object.entries(groups).forEach(([group, items]) => {
+      const card = document.createElement('div');
+      card.className = 'card';
+      const title = document.createElement('h2');
+      title.textContent = group;
+      card.appendChild(title);
+      items.forEach(s => {
+        const value = data.values[s.key] != null ? data.values[s.key] : s.default;
+        const row = document.createElement('div');
+        row.className = 'param-row';
+        const restartTag = s.restart ? '<span class="tag-restart">重启生效</span>' : '';
+        row.innerHTML = `
+          <div class="param-label">${esc(s.label)}${restartTag}</div>
+          <input class="text-input param-input" id="param_${s.key}" type="number"
+                 min="${s.min}" max="${s.max}" step="${s.step}" value="${value}">
+          <span class="param-unit">${esc(s.unit || '')}</span>
+          <div class="param-desc">${esc(s.desc || '')}（范围 ${s.min} ~ ${s.max}，默认 ${s.default}）</div>`;
+        card.appendChild(row);
+      });
+      paramsGroups.appendChild(card);
+    });
+    const pending = (data.restart_pending || []).map(specLabel);
+    paramsHint.textContent = pending.length
+      ? '以下参数需重启服务后生效：' + pending.join('、')
+      : '';
+  }
+
+  function collectParams() {
+    const out = {};
+    paramsSpecs.forEach(s => {
+      const el = document.getElementById('param_' + s.key);
+      if (el) out[s.key] = parseFloat(el.value);
+    });
+    return out;
+  }
+
+  async function loadParams() {
+    try {
+      const r = await fetch('/api/params', { cache: 'no-store' });
+      const data = await r.json();
+      renderParams(data);
+      paramsState.textContent = '';
+    } catch (e) {
+      paramsState.textContent = '读取失败';
+    }
+  }
+
+  async function saveParams() {
+    paramsSave.disabled = true;
+    paramsState.textContent = '保存中…';
+    try {
+      const r = await fetch('/api/params', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(collectParams())
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
+      renderParams(data);
+      const restart = (data.restart_required || []).map(specLabel);
+      paramsState.textContent = restart.length
+        ? `已保存并应用；需重启生效：${restart.join('、')}`
+        : '已保存并应用';
+    } catch (e) {
+      paramsState.textContent = '保存失败';
+      alert('保存失败：' + e.message);
+    } finally {
+      paramsSave.disabled = false;
+    }
+  }
+
+  async function resetParams() {
+    if (!confirm('将把所有算法参数恢复为默认值，确定吗？')) return;
+    paramsReset.disabled = true;
+    paramsState.textContent = '还原中…';
+    try {
+      const r = await fetch('/api/params/reset', { method: 'POST' });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
+      renderParams(data);
+      const restart = (data.restart_required || []).map(specLabel);
+      paramsState.textContent = restart.length
+        ? `已恢复默认值；需重启生效：${restart.join('、')}`
+        : '已恢复默认值';
+    } catch (e) {
+      paramsState.textContent = '还原失败';
+      alert('还原失败：' + e.message);
+    } finally {
+      paramsReset.disabled = false;
+    }
+  }
+
+  paramsSave.addEventListener('click', saveParams);
+  paramsReset.addEventListener('click', resetParams);
 
   renderSeq();
 </script>

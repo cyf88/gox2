@@ -20,6 +20,12 @@ _MODEL_NAME = "buffalo_l"
 # ArcFace 余弦相似度阈值：相似度 >= 该值判定为同一人
 _DEFAULT_THRESHOLD = 0.4
 
+# 多模板注册
+MAX_TEMPLATES = 5        # 每人最多保留的样本数
+_MIN_DET_SCORE = 0.5     # 注册时要求的最低检测置信度
+_MIN_FACE_SIZE = 80      # 注册时人脸框最短边的最小像素
+_DUP_SIM = 0.95          # 与已有样本这么像就当作重复，跳过
+
 
 class FaceRecognizer:
     """检测并识别画面中的人脸，返回识别结果。"""
@@ -52,7 +58,7 @@ class FaceRecognizer:
         self._faces_dir.mkdir(parents=True, exist_ok=True)
         self._threshold = threshold
         self._max_detect_width = max_detect_width
-        self._registry: dict[str, np.ndarray] = {}
+        self._registry: dict[str, list[np.ndarray]] = {}
         self._load_registry()
         logger.info(
             "人脸识别就绪（det_size=%d，推理线程=%d，检测图最大宽度=%d）",
@@ -62,32 +68,97 @@ class FaceRecognizer:
     # ─── 人脸库管理 ─────────────────────────────────────────────
 
     def _load_registry(self) -> None:
+        """加载人脸库：新格式为 faces/<姓名>/<序号>.npy（多模板），兼容旧的 faces/<姓名>.npy。"""
         self._registry.clear()
         for path in self._faces_dir.glob("*.npy"):
-            name = path.stem
             try:
-                self._registry[name] = np.load(path)
+                self._registry[path.stem] = [np.load(path)]
             except Exception as exc:
                 logger.warning("加载人脸特征失败 %s: %s", path, exc)
-        logger.info("已加载 %d 个注册人脸: %s", len(self._registry), list(self._registry))
+        for folder in sorted(p for p in self._faces_dir.iterdir() if p.is_dir()):
+            templates: list[np.ndarray] = []
+            for path in sorted(folder.glob("*.npy")):
+                try:
+                    templates.append(np.load(path))
+                except Exception as exc:
+                    logger.warning("加载人脸特征失败 %s: %s", path, exc)
+            if templates:
+                self._registry[folder.name] = templates
+        total = sum(len(v) for v in self._registry.values())
+        logger.info(
+            "已加载 %d 个注册人脸（共 %d 张模板）: %s",
+            len(self._registry), total, list(self._registry),
+        )
 
-    def register(self, image_path: str, name: str) -> None:
+    def register(self, image_path: str, name: str) -> dict:
         """从图片文件路径提取人脸特征并注册。"""
         img = cv2.imread(image_path)
         if img is None:
             raise ValueError(f"无法读取图片: {image_path}")
-        self.register_image(name, img)
+        return self.register_image(name, img)
 
-    def register_image(self, name: str, img: np.ndarray) -> None:
-        """从图像数据（BGR ndarray）提取人脸特征并注册。"""
+    def register_image(self, name: str, img: np.ndarray) -> dict:
+        """从一张图像注册/追加一个人脸模板，返回 {"templates", "added", "detail"}。
+
+        同一个人可以存多张不同角度/光照的样本（最多 MAX_TEMPLATES 张），
+        识别时取与该人所有模板的最大相似度；名额满后替换掉最相似（最冗余）的那张。
+        """
         faces = self._app.get(img)
         if not faces:
             raise ValueError("未在图片中检测到人脸，请换一张正脸清晰的照片")
         face = max(faces, key=lambda f: f.det_score)
-        np.save(self._faces_dir / f"{name}.npy", face.normed_embedding)
-        self._save_thumbnail(name, img, face)
-        self._registry[name] = face.normed_embedding
-        logger.info("已注册人脸: %s", name)
+        x1, y1, x2, y2 = [float(v) for v in face.bbox]
+        side = min(x2 - x1, y2 - y1)
+        if face.det_score < _MIN_DET_SCORE or side < _MIN_FACE_SIZE:
+            raise ValueError(
+                f"人脸质量不足（置信度 {face.det_score:.2f}，边长 {int(side)}px），"
+                "请上传更清晰、正脸且更大一些的照片"
+            )
+
+        emb = face.normed_embedding
+        templates = list(self._registry.get(name, []))
+        if templates:
+            sims = [float(np.dot(emb, t)) for t in templates]
+            if max(sims) >= _DUP_SIM:
+                return {
+                    "templates": len(templates),
+                    "added": False,
+                    "detail": "与已有样本几乎相同，已跳过",
+                }
+
+        replaced = False
+        if len(templates) >= MAX_TEMPLATES:
+            sims = [float(np.dot(emb, t)) for t in templates]
+            templates[int(np.argmax(sims))] = emb
+            replaced = True
+        else:
+            templates.append(emb)
+
+        self._persist_templates(name, templates)
+        self._registry[name] = templates
+        if not (self._faces_dir / f"{name}.jpg").exists():
+            self._save_thumbnail(name, img, face)
+        logger.info("已保存人脸样本: %s（共 %d 张）", name, len(templates))
+        return {
+            "templates": len(templates),
+            "added": not replaced,
+            "detail": "名额已满，已替换最相似的一张" if replaced else "",
+        }
+
+    def _persist_templates(self, name: str, templates: list[np.ndarray]) -> None:
+        """把某人的全部模板重写到 faces/<姓名>/1.npy ... N.npy。"""
+        folder = self._faces_dir / name
+        folder.mkdir(parents=True, exist_ok=True)
+        legacy = self._faces_dir / f"{name}.npy"
+        if legacy.exists():
+            legacy.unlink()
+        for path in folder.glob("*.npy"):
+            path.unlink()
+        for idx, emb in enumerate(templates, 1):
+            np.save(folder / f"{idx}.npy", emb)
+
+    def template_count(self, name: str) -> int:
+        return len(self._registry.get(name, []))
 
     def _save_thumbnail(self, name: str, img: np.ndarray, face) -> None:
         """裁剪人脸区域并保存为缩略图，供列表展示。"""
@@ -124,16 +195,27 @@ class FaceRecognizer:
         return list(self._registry)
 
     def delete(self, name: str) -> bool:
-        """删除一个已注册的人脸（特征 + 缩略图）。"""
+        """删除一个已注册的人脸（全部模板 + 缩略图）。"""
         if name not in self._registry:
             return False
-        for ext in (".npy", ".jpg"):
-            p = self._faces_dir / f"{name}{ext}"
+        folder = self._faces_dir / name
+        if folder.is_dir():
+            for path in folder.glob("*"):
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    logger.warning("删除人脸文件失败 %s: %s", path, exc)
             try:
-                if p.exists():
-                    p.unlink()
+                folder.rmdir()
+            except OSError:
+                pass
+        for ext in (".npy", ".jpg"):
+            path = self._faces_dir / f"{name}{ext}"
+            try:
+                if path.exists():
+                    path.unlink()
             except OSError as exc:
-                logger.warning("删除人脸文件失败 %s: %s", p, exc)
+                logger.warning("删除人脸文件失败 %s: %s", path, exc)
         self._registry.pop(name, None)
         logger.info("已删除注册人脸: %s", name)
         return True
@@ -257,13 +339,14 @@ class FaceRecognizer:
         return None, best_sim
 
     def _best_match(self, emb: np.ndarray) -> tuple[Optional[str], float]:
-        """返回最相似的 (姓名, 相似度)，不做过阈值过滤。"""
+        """返回最相似的 (姓名, 相似度)，不做过阈值过滤；多人多模板时取全局最大值。"""
         best_name: Optional[str] = None
         best_sim = -1.0
-        for name, ref in self._registry.items():
-            sim = float(np.dot(emb, ref))  # 已归一化，点积即余弦相似度
-            if sim > best_sim:
-                best_name, best_sim = name, sim
+        for name, templates in self._registry.items():
+            for ref in templates:
+                sim = float(np.dot(emb, ref))  # 已归一化，点积即余弦相似度
+                if sim > best_sim:
+                    best_name, best_sim = name, sim
         return best_name, best_sim
 
 

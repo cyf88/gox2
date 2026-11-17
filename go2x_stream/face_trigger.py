@@ -22,6 +22,9 @@ _DEFAULTS: dict[str, Any] = {
     "say": "",
     "steps": [],
     "cooldown": 10.0,
+    # 未认出来时先坐下，让画面稳定后再重新识别/执行动作
+    "sit_first": True,
+    "settle_s": 2.0,
 }
 
 
@@ -44,6 +47,8 @@ class FaceTriggerStore:
                 "say": self._data.get("say", ""),
                 "steps": list(self._data.get("steps") or []),
                 "cooldown": float(self._data.get("cooldown", 10.0)),
+                "sit_first": bool(self._data.get("sit_first", True)),
+                "settle_s": float(self._data.get("settle_s", 2.0)),
             }
 
     def save(self, payload: dict) -> dict:
@@ -58,6 +63,12 @@ class FaceTriggerStore:
         except (TypeError, ValueError):
             cooldown = 10.0
         cooldown = max(0.0, min(3600.0, cooldown))
+        try:
+            settle_s = float(payload.get("settle_s", 2.0))
+        except (TypeError, ValueError):
+            settle_s = 2.0
+        settle_s = max(0.0, min(30.0, settle_s))
+        sit_first = bool(payload.get("sit_first", True))
         enabled = bool(payload.get("enabled", False))
         if enabled and not say and not steps:
             raise ValueError("开启前请至少填写播报文本或添加动作")
@@ -68,11 +79,14 @@ class FaceTriggerStore:
                 "say": say,
                 "steps": steps,
                 "cooldown": cooldown,
+                "sit_first": sit_first,
+                "settle_s": settle_s,
             }
             self._save_locked()
         logger.info(
-            "人脸触发已保存（%s，%d 步，冷却 %.1fs）",
+            "人脸触发已保存（%s，%d 步，冷却 %.1fs，%s）",
             "开启" if enabled else "关闭", len(steps), cooldown,
+            f"先坐下稳定 {settle_s:.1f}s" if sit_first else "直接执行",
         )
         return self.get()
 
@@ -99,6 +113,8 @@ class FaceTriggerStore:
                 "say": str(data.get("say", "") or ""),
                 "steps": list(data.get("steps") or []),
                 "cooldown": float(data.get("cooldown", 10.0) or 10.0),
+                "sit_first": bool(data.get("sit_first", True)),
+                "settle_s": float(data.get("settle_s", 2.0) or 0.0),
             }
             logger.info(
                 "已加载人脸触发配置（%s）",

@@ -25,7 +25,7 @@
     "vad_rms": 500,
     "silence_ms": 600,
     "max_utterance_ms": 8000,
-    "session_idle_s": 20,
+    "session_idle_s": 10,
     "ack_text": "我在"
   },
   "log_level": "INFO"

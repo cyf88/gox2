@@ -162,7 +162,7 @@ class VoiceChat:
         vad_rms: float = 500.0,
         silence_ms: int = 600,
         max_utterance_ms: int = 8000,
-        session_idle_s: float = 20.0,
+        session_idle_s: float = 10.0,
         ack_text: str = "我在",
         on_event: Optional[Callable[[dict], None]] = None,
         on_enabled_change: Optional[Callable[[bool], None]] = None,
@@ -191,6 +191,7 @@ class VoiceChat:
         self._last_active = 0.0
         self._last_text = ""
         self._last_reply = ""
+        self._last_asr = ""
         self._last_error = ""
         self._listening = False
 
@@ -228,6 +229,24 @@ class VoiceChat:
         except queue.Full:
             pass
 
+    def update_tuning(
+        self,
+        vad_rms: Optional[float] = None,
+        silence_ms: Optional[int] = None,
+        max_utterance_ms: Optional[int] = None,
+        session_idle_s: Optional[float] = None,
+    ) -> None:
+        """运行时更新语音算法参数（页面「算法参数」保存时调用）。"""
+        with self._lock:
+            if vad_rms is not None:
+                self._vad_rms = max(1.0, float(vad_rms))
+            if silence_ms is not None:
+                self._silence_ms = max(100, int(silence_ms))
+            if max_utterance_ms is not None:
+                self._max_utterance_ms = max(500, int(max_utterance_ms))
+            if session_idle_s is not None:
+                self._session_idle_s = max(1.0, float(session_idle_s))
+
     def set_enabled(self, enabled: bool) -> None:
         with self._lock:
             self._enabled = bool(enabled)
@@ -264,6 +283,7 @@ class VoiceChat:
                 "api_ready": self._chat.ready,
                 "last_text": self._last_text,
                 "last_reply": self._last_reply,
+                "last_asr": self._last_asr,
                 "error": self._last_error,
             }
 
@@ -306,6 +326,7 @@ class VoiceChat:
                     buf = list(pre_roll)
                     pre_roll = []
                     self._set_listening(True)
+                    self._touch()
                 continue
 
             buf.append(pcm)
@@ -318,8 +339,15 @@ class VoiceChat:
                 data = np.concatenate(buf) if buf else np.empty(0, dtype=np.int16)
                 buf = []
                 pre_roll = []
+                self._touch()
                 self._handle_utterance(data, rate)
             self._maybe_end_session()
+
+    def _touch(self) -> None:
+        """有新的语音输入时刷新会话活跃时间，避免说话途中被判超时。"""
+        with self._lock:
+            if self._in_session:
+                self._last_active = time.monotonic()
 
     def _maybe_end_session(self) -> None:
         with self._lock:
@@ -328,11 +356,13 @@ class VoiceChat:
             if time.monotonic() - self._last_active <= self._session_idle_s:
                 return
             self._in_session = False
-        logger.info("对话会话超时结束")
+            idle = self._session_idle_s
+        logger.info("对话会话超时结束（%.0f 秒无语音输入）", idle)
         self._chat.reset()
         self._emit()
 
     def _handle_utterance(self, pcm: np.ndarray, rate: int) -> None:
+        duration_ms = 1000.0 * len(pcm) / max(1, rate)
         try:
             text = self._asr.transcribe(pcm, rate)
         except Exception as exc:
@@ -340,8 +370,12 @@ class VoiceChat:
             self._set_error(f"语音识别失败: {exc}")
             return
         if not text:
+            logger.info("语音识别结果为空（音频 %.0f ms）", duration_ms)
             return
         logger.info("识别到语音: %s", text)
+        with self._lock:
+            self._last_asr = text
+        self._emit()
 
         norm = normalize_text(text)
         with self._lock:
@@ -357,6 +391,7 @@ class VoiceChat:
             return
 
         if not self._wake_norm or self._wake_norm not in norm:
+            logger.info("未命中唤醒词「%s」，忽略: %s", self._wake_word, text)
             return  # 未唤醒
 
         remainder = norm.split(self._wake_norm, 1)[1]

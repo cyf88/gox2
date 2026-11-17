@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 
 # 打包后的 exe 控制台默认 GBK 编码，unitree 库会打印 emoji，需强制 UTF-8
 if hasattr(sys.stdout, "reconfigure"):
@@ -192,7 +193,7 @@ def create_chat(stream, cfg: dict):
         vad_rms=float(cfg.get("vad_rms", 500)),
         silence_ms=int(cfg.get("silence_ms", 600)),
         max_utterance_ms=int(cfg.get("max_utterance_ms", 8000)),
-        session_idle_s=float(cfg.get("session_idle_s", 20)),
+        session_idle_s=float(cfg.get("session_idle_s", 10)),
         ack_text=cfg.get("ack_text", "我在"),
         on_enabled_change=_on_toggle,
     )
@@ -266,10 +267,24 @@ def create_stream(args: argparse.Namespace):
 
 def main() -> int:
     args = parse_args()
+    # 同时输出到控制台和 go2x.log，方便后台运行时查看识别/连接日志
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    try:
+        handlers.append(
+            RotatingFileHandler(
+                app_dir() / "go2x.log",
+                maxBytes=5 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            )
+        )
+    except OSError as exc:
+        print(f"无法写入日志文件: {exc}", file=sys.stderr)
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%H:%M:%S",
+        handlers=handlers,
     )
     # aiortc/aioice 会对每个不可用的本地地址打印 INFO，噪声较大
     for name in ("aiortc", "aioice", "aioice.ice"):

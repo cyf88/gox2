@@ -26,6 +26,16 @@ for pkg in (
 for pkg in ("aiortc", "aioice", "unitree_webrtc_connect", "pydantic"):
     hiddenimports += collect_submodules(pkg)
 
+# 语音对话用的本地 ASR（运行时才导入，需要把原生库一起收进来）
+for pkg in ("faster_whisper", "ctranslate2", "tokenizers", "huggingface_hub"):
+    try:
+        d, b, h = collect_all(pkg)
+    except Exception:
+        continue
+    datas += d
+    binaries += b
+    hiddenimports += h
+
 # ── 项目资源文件 ──────────────────────────────────────────────
 # web 页面（server.py 通过 resource_dir()/go2x_stream/web/index.html 读取）
 datas += [("go2x_stream/web/index.html", "go2x_stream/web")]
